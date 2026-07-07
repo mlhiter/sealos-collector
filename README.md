@@ -1,35 +1,56 @@
 # Sealos Collector
 
-Sealos Collector is a backend health evidence adapter for OpenStatus-backed
-public status pages. It collects platform signals from a Sealos/Kubernetes
-cluster, emits a sanitized JSON snapshot, and can sync that snapshot into
-OpenStatus page components and status reports.
+> Read-only Kubernetes health evidence for OpenStatus public status pages.
 
-The project does not own the public UI. OpenStatus is the user-facing status
-page; this project only collects and adapts Sealos-specific platform evidence.
+[![Go](https://img.shields.io/badge/Go-1.23-00ADD8?style=flat-square&logo=go&logoColor=white)](https://go.dev/)
+[![Kubernetes](https://img.shields.io/badge/Kubernetes-read--only-326CE5?style=flat-square&logo=kubernetes&logoColor=white)](https://kubernetes.io/)
+[![OpenStatus](https://img.shields.io/badge/OpenStatus-adapter-111827?style=flat-square)](https://www.openstatus.dev/)
 
-## What It Collects
+Sealos Collector turns internal platform signals from a Sealos-like Kubernetes
+cluster into a sanitized status snapshot, then optionally syncs that snapshot
+into [OpenStatus](https://www.openstatus.dev/) page components and incident
+reports.
 
-- Kubernetes control-plane readiness via `/readyz`
-- Deployment, StatefulSet, and DaemonSet readiness
-- Service endpoint address availability through EndpointSlices
-- HTTP checks from the collector runtime
-- Prometheus/VictoriaMetrics instant queries
-- Recent actionable Kubernetes Warning events; warnings attached to deleted,
-  terminating, or completed Pods and common controller retry conflicts are
-  ignored so historical event residue does not keep a public page degraded.
+It is not a replacement for OpenStatus, Grafana, or alerting. It is the
+thin evidence layer between Kubernetes reality and a public status page.
 
-## What It Does Not Do Yet
+> [!IMPORTANT]
+> The collector is read-only toward the monitored Kubernetes cluster. Public
+> snapshots are designed to hide raw check internals by default.
+
+[Quick start](#quick-start) • [How it works](#how-it-works) •
+[Configuration](#configuration) • [OpenStatus sync](#openstatus-sync) •
+[Deployment](#deployment) • [Docs](#docs)
+
+## What it does
+
+- Collects Kubernetes readiness, workloads, EndpointSlices, HTTP checks,
+  Prometheus/VictoriaMetrics queries, and recent actionable Warning events.
+- Aggregates those checks into user-facing component statuses:
+  `operational`, `unknown`, `degraded`, or `outage`.
+- Emits a public-safe `summary.json` snapshot with sanitized check evidence.
+- Writes OpenStatus static page components and collector-owned status reports.
+- Keeps OpenStatus uptime monitors disabled by default until real monitor data
+  exists.
+
+## What it does not do
 
 - It does not host a custom public status page.
+- It does not remediate incidents or write Kubernetes resources.
 - It does not send subscriber notifications.
-- It does not write to the monitored Kubernetes cluster.
-- It writes only the OpenStatus tables needed for pages, page components,
-  component groups, and status report lifecycle. OpenStatus monitor rows are
-  used only when uptime probes are explicitly enabled.
-- It does not replace OpenStatus dashboard/status-page UI.
+- It does not publish kubeconfigs, bearer tokens, raw headers, raw Secret data,
+  full internal queries, or raw Warning samples.
 
-## Quick Start
+## Quick start
+
+### Prerequisites
+
+- Go 1.23+
+- Access to a Kubernetes cluster through `KUBECONFIG` or in-cluster config
+- Optional: a Prometheus-compatible query endpoint
+- Optional: a self-hosted OpenStatus libSQL HTTP endpoint
+
+Run one collection pass with the example config:
 
 ```bash
 go run ./cmd/sealos-collector \
@@ -45,35 +66,66 @@ KUBECONFIG=/path/to/kubeconfig go run ./cmd/sealos-collector \
   --output -
 ```
 
-Run continuously:
+Run continuously and keep lightweight state for transient `unknown` checks:
 
 ```bash
 go run ./cmd/sealos-collector \
   --config ./configs/sealos.example.yaml \
   --output ./dist/summary.json \
+  --state ./dist/state.json \
   --interval 60s
 ```
 
-Sync a generated snapshot into OpenStatus:
+Inspect the result:
 
 ```bash
-OPENSTATUS_DATABASE_URL=http://openstatus-libsql:8080 \
-go run ./cmd/openstatus-sync \
-  --snapshot ./dist/summary.json \
-  --page-slug sealos-status \
-  --show-uptime=false \
-  --interval 60s
+jq '{overallStatus, components: [.components[] | {id, status, summary}]}' \
+  ./dist/summary.json
 ```
 
-## Snapshot Contract
+> [!NOTE]
+> The default example includes an in-cluster VictoriaMetrics service URL. If you
+> run from a laptop, either port-forward a Prometheus endpoint or remove that
+> check for the first smoke test.
 
-The collector outputs a JSON document shaped for public status consumers:
+## How it works
+
+```text
+Kubernetes API / HTTP / Prometheus / Events
+                  |
+                  v
+          sealos-collector
+                  |
+                  v
+          sanitized summary.json
+                  |
+                  v
+          openstatus-sync
+                  |
+                  v
+       OpenStatus public status page
+```
+
+The collector maps platform evidence to product promises. A component without
+evidence is `unknown`; a component with partial failure is `degraded`; a
+component with no viable serving path is `outage`.
+
+Non-operational checks include structured public semantics such as
+`reasonCode`, `impactHint`, `signalSummary`, and `confidence`. The OpenStatus
+adapter renders those fields into compact Incident Digest updates without
+parsing raw Kubernetes event text.
+
+## Snapshot format
+
+The collector writes a JSON document shaped for public status consumers:
 
 ```json
 {
   "version": "v1",
-  "cluster": { "id": "example-cluster", "name": "Example Sealos Cluster" },
-  "generatedAt": "2026-07-07T10:00:00Z",
+  "cluster": {
+    "id": "example-cluster",
+    "name": "Example Sealos Cluster"
+  },
   "overallStatus": "operational",
   "components": [
     {
@@ -103,65 +155,80 @@ The collector outputs a JSON document shaped for public status consumers:
 }
 ```
 
-`publish.includeCheckDetails` defaults to the public-safe posture in the example
-config: raw `checks` are hidden, while sanitized `publicChecks` remain available
-so OpenStatus events can explain impact and failing checks without exposing
-secrets, kubeconfigs, bearer tokens, raw request headers, or full internal
-queries. Set `includeCheckDetails` to `true` only when the downstream consumer
-is private or when you need debugging evidence.
+`publish.includeCheckDetails` defaults to `false` in the examples. Keep it that
+way for public pages; set it to `true` only for trusted internal debugging.
 
-`publicChecks` also carry structured incident semantics. Non-operational checks
-include `reasonCode`, `impactHint`, `signalSummary`, and `confidence` so
-OpenStatus can render dense Incident Digest updates without parsing raw log
-or event samples. Warning event samples are classified inside the collector and
-are not published in `publicChecks.metadata`.
+## Configuration
 
-## Architecture
+Start from one of the examples:
 
-```text
-Kubernetes API / VictoriaMetrics / HTTP checks / Events
-                    |
-                    v
-          sealos-collector snapshot
-                    |
-                    v
-          openstatus-sync adapter
-                    |
-                    v
-              OpenStatus status page
-```
+| File | Use case |
+| --- | --- |
+| `configs/sealos.example.yaml` | In-cluster or local smoke testing with common Sealos-style components. |
+| `configs/host.example.yaml` | Host/container deployment beside a self-hosted OpenStatus stack. |
 
-## Repository Layout
-
-- `cmd/sealos-collector`: CLI entrypoint.
-- `cmd/openstatus-sync`: backend adapter that writes snapshots into OpenStatus.
-- `internal/config`: YAML configuration loading and validation.
-- `internal/collector`: check execution and snapshot assembly.
-- `internal/openstatus`: libSQL/Hrana client and OpenStatus sync logic.
-- `internal/status`: public snapshot schema and status aggregation helpers.
-- `configs/sealos.example.yaml`: example Sealos component mapping.
-- `configs/host.example.yaml`: host deployment example. Copy it to an ignored
-  `configs/*.local.yaml` file for private cluster values.
-- `deploy/`: read-only Kubernetes RBAC and a CronJob smoke example. The sample
-  CronJob writes JSON to logs; durable external publishing is a later phase.
-- `deploy/host`: host/container deployment helpers for collector and
-  OpenStatus deployment.
-
-## Verification
-
-```bash
-go test ./...
-```
-
-## Host Deployment With OpenStatus
-
-The host deployment helper runs the collector beside a self-hosted OpenStatus
-stack. Keep private values in environment variables and ignored local config
-files:
+Private values should live in ignored local config files:
 
 ```bash
 cp configs/host.example.yaml configs/my-cluster.local.yaml
+```
 
+The collector resolves Kubernetes access in this order:
+
+1. `cluster.kubeconfig` from the config file
+2. `KUBECONFIG`
+3. in-cluster config
+4. local `~/.kube/config`
+
+Supported check types include:
+
+| Type | What it verifies |
+| --- | --- |
+| `workload` | Deployment, StatefulSet, or DaemonSet readiness. |
+| `serviceEndpoints` | Ready EndpointSlice addresses for a Service. |
+| `kubernetesReadyz` | Kubernetes API readiness endpoint. |
+| `http` | External or internal HTTP status checks. |
+| `prometheusQuery` | Prometheus-compatible instant query thresholds. |
+| `recentWarnings` | Current actionable Kubernetes Warning events. |
+
+## OpenStatus sync
+
+Generate a snapshot, then sync it into OpenStatus:
+
+```bash
+OPENSTATUS_DATABASE_URL=http://openstatus-libsql:8080 \
+go run ./cmd/openstatus-sync \
+  --snapshot ./dist/summary.json \
+  --workspace-slug sealos \
+  --workspace-name "Sealos" \
+  --page-slug sealos-status \
+  --page-title "Sealos Status" \
+  --show-uptime=false
+```
+
+With `--show-uptime=false`, the adapter uses static page components and keeps
+the unused Monitors page out of the public status experience. Enable uptime
+only after OpenStatus monitor runs are actually available.
+
+OpenStatus reports are collector-owned:
+
+- `operational` resolves the active report.
+- `unknown` and `degraded` create or update a degraded-performance report.
+- `outage` creates or updates a major-outage report.
+- removed components have their stale collector-owned reports resolved.
+
+## Deployment
+
+There are two deployment shapes in this repository:
+
+| Path | Purpose |
+| --- | --- |
+| `deploy/cronjob.yaml` | Read-only Kubernetes CronJob smoke example that writes snapshots to logs. |
+| `deploy/host/deploy-openstatus-host.sh` | Host deployment helper for collector + OpenStatus sync + status-page proxy. |
+
+For host deployment, keep real cluster values out of Git:
+
+```bash
 REMOTE=status-host \
 CONFIG_SOURCE=configs/my-cluster.local.yaml \
 KUBECONFIG_REMOTE_PATH=/etc/sealos-collector/kubeconfig \
@@ -172,14 +239,60 @@ OPENSTATUS_PAGE_HOST=sealos-status.openstatus.dev \
 deploy/host/deploy-openstatus-host.sh
 ```
 
-`sealos-collector` writes `summary.json` into the host `public` directory.
-`openstatus-sync` reads that mounted directory and updates OpenStatus static
-page components plus active/resolved status reports. Collector-owned status
-reports remain the source of truth for component health. OpenStatus
-uptime/monitor rows are disabled by default so the public page does not show
-empty monitor data.
+See [docs/runbook.md](./docs/runbook.md) for container names, certificate
+trust, OpenStatus proxy behavior, and smoke-test commands.
 
-The host proxy presents the status page with the configured OpenStatus slug
-host, strips the self-hosted status-page CSP directive that forces HTTP
-deployments to upgrade static assets to HTTPS, redirects `/monitors` back to
-`/` while uptime is hidden, and keeps incident pages compact.
+## Public safety checklist
+
+Before publishing a snapshot or opening a status page:
+
+- Keep `publish.includeCheckDetails: false`.
+- Review component and group names for public readability.
+- Verify generated JSON contains no kubeconfig, token, URL userinfo, raw Secret
+  data, internal request headers, or full internal queries.
+- Treat `summary.json` as a backend exchange file unless you explicitly publish
+  it through a trusted route.
+- Keep private cluster config in `configs/*.local.yaml`.
+
+## Project layout
+
+```text
+cmd/sealos-collector    Collects evidence and writes summary.json
+cmd/openstatus-sync     Syncs snapshots into OpenStatus
+configs/                Public-safe example configs
+deploy/                 Kubernetes and host deployment examples
+docs/                   Architecture, runbook, references, IA
+internal/collector      Check execution and aggregation
+internal/openstatus     OpenStatus libSQL/Hrana adapter
+internal/status         Public snapshot schema
+```
+
+## Development
+
+Run the test suite:
+
+```bash
+go test ./...
+```
+
+Build local binaries:
+
+```bash
+go build -o ./bin/sealos-collector ./cmd/sealos-collector
+go build -o ./bin/openstatus-sync ./cmd/openstatus-sync
+```
+
+Build a Linux container image:
+
+```bash
+docker buildx build --platform linux/amd64 -t sealos-collector:local .
+```
+
+## Docs
+
+- [Architecture](./docs/architecture.md)
+- [Runbook](./docs/runbook.md)
+- [Information architecture](./docs/ia.md)
+- [References](./docs/references.md)
+- [Product notes](./PRODUCT.md)
+- [Design notes](./DESIGN.md)
