@@ -1,0 +1,65 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sealos-collector-config
+  namespace: sealos
+data:
+  config.yaml: |
+    cluster:
+      id: production
+      name: Sealos Production
+      prometheus:
+        baseURL: http://vmselect-vm-stack-victoria-metrics-k8s-stack.vm.svc:8481/select/0/prometheus
+    publish:
+      includeCheckDetails: false
+    components:
+      - id: platform-control-plane
+        name: Platform Control Plane
+        group: Infrastructure
+        userFacing: false
+        checks:
+          - id: kube-readyz
+            type: kubernetesReadyz
+            name: Kubernetes API readyz
+            path: /readyz?verbose=true
+          - id: recent-warnings
+            type: recentWarnings
+            name: Recent actionable cluster warnings
+            namespace: ""
+            since: 15m
+            warningCount: 1
+            criticalCount: 20
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: sealos-collector
+  namespace: sealos
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: sealos-collector
+          restartPolicy: OnFailure
+          containers:
+            - name: collector
+              image: ghcr.io/example/sealos-collector:latest
+              imagePullPolicy: IfNotPresent
+              args:
+                - --config=/config/config.yaml
+                # Publishing targets are intentionally not part of the MVP.
+                # Write JSON to logs until a trusted external sink is wired.
+                - --output=-
+              volumeMounts:
+                - name: config
+                  mountPath: /config
+                  readOnly: true
+          volumes:
+            - name: config
+              configMap:
+                name: sealos-collector-config

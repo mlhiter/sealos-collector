@@ -1,0 +1,15 @@
+[Unit]
+Description=Sealos Collector snapshot loop
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/sealos-collector
+Environment=SEALOS_COLLECTOR_ROOT=/opt/sealos-collector
+Environment=SEALOS_COLLECTOR_INTERVAL=60s
+ExecStart=/opt/sealos-collector/bin/run-collector.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

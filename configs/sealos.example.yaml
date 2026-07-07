@@ -1,0 +1,129 @@
+cluster:
+  id: example-cluster
+  name: Example Sealos Cluster
+  # kubeconfig/context are optional. The collector first honors this config,
+  # then KUBECONFIG, then in-cluster config, then ~/.kube/config.
+  kubeconfig: ""
+  context: ""
+  http:
+    timeout: 5s
+  prometheus:
+    # On a Sealos cluster with VictoriaMetrics this is usually a vmauth or
+    # vmselect-compatible Prometheus API base URL.
+    baseURL: http://vmselect-vm-stack-victoria-metrics-k8s-stack.vm.svc:8481/select/0/prometheus
+    timeout: 5s
+
+publish:
+  # Public snapshots should normally hide check-level internals. Set this to
+  # true only for private debugging or a trusted internal dashboard.
+  includeCheckDetails: false
+
+statusPolicy:
+  # A transient unknown check reuses the last known non-unknown signal for this
+  # many runs before becoming degraded. This prevents public unknown noise from
+  # one-off API or network read failures.
+  unknownGraceRuns: 2
+  staleAfter: 10m
+
+components:
+  - id: console
+    name: Console
+    group: Access
+    description: Login and desktop entry points.
+    userFacing: true
+    checks:
+      - id: desktop-ready
+        type: workload
+        name: Desktop deployment
+        namespace: sealos
+        kind: Deployment
+        resourceName: sealos-desktop
+      - id: desktop-endpoints
+        type: serviceEndpoints
+        name: Desktop service endpoints
+        namespace: sealos
+        serviceName: sealos-desktop
+      - id: console-http
+        type: http
+        name: Console external HTTP
+        url: https://console.example.com
+        expectedStatuses: [200, 302]
+        timeout: 5s
+
+  - id: platform-control-plane
+    name: Platform Control Plane
+    group: Infrastructure
+    description: Kubernetes API readiness and recent actionable warning events.
+    userFacing: false
+    checks:
+      - id: kube-readyz
+        type: kubernetesReadyz
+        name: Kubernetes API readyz
+        path: /readyz?verbose=true
+      - id: recent-warnings
+        type: recentWarnings
+        name: Recent actionable cluster warnings
+        namespace: ""
+        since: 15m
+        warningCount: 1
+        criticalCount: 20
+      - id: apiserver-p99-latency
+        type: prometheusQuery
+        name: Kubernetes API p99 latency
+        query: max(cluster_quantile:apiserver_request_sli_duration_seconds:histogram_quantile{quantile="0.99"})
+        warningAbove: 1
+        criticalAbove: 3
+
+  - id: app-launchpad
+    name: App Launchpad
+    group: Products
+    description: Application deployment product surface.
+    userFacing: true
+    checks:
+      - id: launchpad-frontend-ready
+        type: workload
+        name: Launchpad frontend
+        namespace: applaunchpad-frontend
+        kind: Deployment
+        resourceName: applaunchpad-frontend
+      - id: launchpad-monitor-ready
+        type: workload
+        name: Launchpad monitor
+        namespace: sealos
+        kind: Deployment
+        resourceName: launchpad-monitor-deployment
+
+  - id: database
+    name: Database
+    group: Products
+    description: Database frontend and database monitor.
+    userFacing: true
+    checks:
+      - id: dbprovider-ready
+        type: workload
+        name: Database frontend
+        namespace: dbprovider-frontend
+        kind: Deployment
+        resourceName: dbprovider-frontend
+      - id: database-monitor-ready
+        type: workload
+        name: Database monitor
+        namespace: sealos
+        kind: Deployment
+        resourceName: database-monitor-deployment
+
+  - id: monitoring
+    name: Monitoring
+    group: Infrastructure
+    description: VictoriaMetrics query availability.
+    userFacing: false
+    checks:
+      - id: vm-query-up
+        type: prometheusQuery
+        name: VictoriaMetrics query path
+        # This in-cluster service name is expected to work from a collector Pod.
+        # For local kubeconfig-only smoke tests, use a port-forwarded URL or
+        # remove this check.
+        query: up
+        warningBelow: 1
+        criticalBelow: 1

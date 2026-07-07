@@ -1,0 +1,14 @@
+/bin/
+/dist/
+.workflow/
+backups/
+certs/
+public/
+configs/*.local.yaml
+*.tmp
+*.pem
+coverage.out
+.DS_Store
+.env
+.env.*
+deploy/host/.env*

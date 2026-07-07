@@ -1,0 +1,327 @@
+cluster:
+  id: host-example
+  name: Example Host Deployment
+  kubeconfig: /etc/sealos-collector/kubeconfig
+  http:
+    timeout: 5s
+  prometheus:
+    # Host deployments may not resolve *.svc names. Use a Prometheus-compatible
+    # endpoint reachable from the host, such as a port-forward, load balancer,
+    # or in-network proxy.
+    baseURL: http://prometheus.example.internal/select/0/prometheus
+    timeout: 5s
+
+publish:
+  includeCheckDetails: false
+
+statusPolicy:
+  unknownGraceRuns: 2
+  staleAfter: 10m
+
+components:
+  - id: console
+    name: Console
+    group: Access
+    description: Login and desktop entry points.
+    userFacing: true
+    checks:
+      - id: desktop-ready
+        type: workload
+        name: Desktop deployment
+        namespace: sealos
+        kind: Deployment
+        resourceName: sealos-desktop
+      - id: desktop-endpoints
+        type: serviceEndpoints
+        name: Desktop service endpoints
+        namespace: sealos
+        serviceName: sealos-desktop
+      - id: console-http
+        type: http
+        name: Console external HTTP
+        url: https://console.example.com
+        expectedStatuses: [200, 302]
+        timeout: 15s
+
+  - id: platform-control-plane
+    name: Platform Control Plane
+    group: Infrastructure
+    description: Kubernetes API readiness and recent actionable warning events.
+    userFacing: false
+    checks:
+      - id: kube-readyz
+        type: kubernetesReadyz
+        name: Kubernetes API readyz
+        path: /readyz?verbose=true
+      - id: recent-warnings
+        type: recentWarnings
+        name: Recent actionable cluster warnings
+        namespace: ""
+        since: 15m
+        warningCount: 1
+        criticalCount: 20
+      - id: apiserver-p99-latency
+        type: prometheusQuery
+        name: Kubernetes API p99 latency
+        query: max(cluster_quantile:apiserver_request_sli_duration_seconds:histogram_quantile{quantile="0.99"})
+        warningAbove: 1
+        criticalAbove: 3
+
+  - id: app-launchpad
+    name: App Launchpad
+    group: Products
+    description: Application deployment product surface.
+    userFacing: true
+    checks:
+      - id: launchpad-frontend-ready
+        type: workload
+        name: Launchpad frontend
+        namespace: applaunchpad-frontend
+        kind: Deployment
+        resourceName: applaunchpad-frontend
+      - id: launchpad-monitor-ready
+        type: workload
+        name: Launchpad monitor
+        namespace: sealos
+        kind: Deployment
+        resourceName: launchpad-monitor-deployment
+      - id: launchpad-controller-ready
+        type: workload
+        name: App controller
+        namespace: app-system
+        kind: Deployment
+        resourceName: app-controller-manager
+      - id: launchpad-endpoints
+        type: serviceEndpoints
+        name: Launchpad frontend endpoints
+        namespace: applaunchpad-frontend
+        serviceName: applaunchpad-frontend
+
+  - id: database
+    name: Database
+    group: Products
+    description: Database frontend and database monitor.
+    userFacing: true
+    checks:
+      - id: dbprovider-ready
+        type: workload
+        name: Database frontend
+        namespace: dbprovider-frontend
+        kind: Deployment
+        resourceName: dbprovider-frontend
+      - id: database-monitor-ready
+        type: workload
+        name: Database monitor
+        namespace: sealos
+        kind: Deployment
+        resourceName: database-monitor-deployment
+      - id: kubeblocks-ready
+        type: workload
+        name: KubeBlocks controller
+        namespace: kb-system
+        kind: Deployment
+        resourceName: kubeblocks
+      - id: database-endpoints
+        type: serviceEndpoints
+        name: Database frontend endpoints
+        namespace: dbprovider-frontend
+        serviceName: dbprovider-frontend
+
+  - id: devbox
+    name: DevBox
+    group: Products
+    description: Cloud development environment product surface.
+    userFacing: true
+    checks:
+      - id: devbox-frontend-ready
+        type: workload
+        name: DevBox frontend
+        namespace: devbox-frontend
+        kind: Deployment
+        resourceName: devbox-frontend
+      - id: devbox-frontend-endpoints
+        type: serviceEndpoints
+        name: DevBox frontend endpoints
+        namespace: devbox-frontend
+        serviceName: devbox-frontend
+      - id: devbox-service-ready
+        type: workload
+        name: DevBox service
+        namespace: devbox-system
+        kind: Deployment
+        resourceName: devbox-service
+      - id: devbox-controller-ready
+        type: workload
+        name: DevBox controller
+        namespace: devbox-system
+        kind: Deployment
+        resourceName: devbox-controller-manager
+      - id: devbox-sshgate-ready
+        type: workload
+        name: DevBox SSH gateway
+        namespace: devbox-system
+        kind: DaemonSet
+        resourceName: sshgate
+
+  - id: object-storage
+    name: Object Storage
+    group: Products
+    description: Object storage frontend, controller, pool, and monitor.
+    userFacing: true
+    checks:
+      - id: object-storage-frontend-ready
+        type: workload
+        name: Object Storage frontend
+        namespace: objectstorage-frontend
+        kind: Deployment
+        resourceName: object-storage-frontend
+      - id: object-storage-frontend-endpoints
+        type: serviceEndpoints
+        name: Object Storage frontend endpoints
+        namespace: objectstorage-frontend
+        serviceName: object-storage-frontend
+      - id: object-storage-controller-ready
+        type: workload
+        name: Object Storage controller
+        namespace: objectstorage-system
+        kind: Deployment
+        resourceName: objectstorage-controller-manager
+      - id: object-storage-pool-ready
+        type: workload
+        name: Object Storage pool
+        namespace: objectstorage-system
+        kind: StatefulSet
+        resourceName: object-storage-pool-1
+      - id: object-storage-monitor-ready
+        type: workload
+        name: Object Storage monitor
+        namespace: objectstorage-system
+        kind: Deployment
+        resourceName: object-storage-monitor-deployment
+      - id: object-storage-prometheus-up
+        type: prometheusQuery
+        name: Object Storage scrape targets
+        query: sum(up{job=~"object-storage.*"})
+        warningBelow: 2
+        criticalBelow: 1
+
+  - id: terminal
+    name: Terminal
+    group: Products
+    description: Browser terminal product surface and controller.
+    userFacing: true
+    checks:
+      - id: terminal-frontend-ready
+        type: workload
+        name: Terminal frontend
+        namespace: terminal-frontend
+        kind: Deployment
+        resourceName: terminal-frontend
+      - id: terminal-frontend-endpoints
+        type: serviceEndpoints
+        name: Terminal frontend endpoints
+        namespace: terminal-frontend
+        serviceName: terminal-frontend
+      - id: terminal-controller-ready
+        type: workload
+        name: Terminal controller
+        namespace: terminal-system
+        kind: Deployment
+        resourceName: terminal-controller-manager
+
+  - id: app-store
+    name: App Store
+    group: Products
+    description: Template marketplace frontend.
+    userFacing: true
+    checks:
+      - id: template-frontend-ready
+        type: workload
+        name: Template frontend
+        namespace: template-frontend
+        kind: Deployment
+        resourceName: template-frontend
+      - id: template-frontend-endpoints
+        type: serviceEndpoints
+        name: Template frontend endpoints
+        namespace: template-frontend
+        serviceName: template-frontend
+
+  - id: kite
+    name: Kite
+    group: Products
+    description: Kite dashboard and PostgreSQL dependency.
+    userFacing: true
+    checks:
+      - id: kite-ready
+        type: workload
+        name: Kite dashboard
+        namespace: kite-system
+        kind: Deployment
+        resourceName: kite
+      - id: kite-endpoints
+        type: serviceEndpoints
+        name: Kite endpoints
+        namespace: kite-system
+        serviceName: kite
+      - id: kite-postgresql-ready
+        type: workload
+        name: Kite PostgreSQL
+        namespace: kite-system
+        kind: StatefulSet
+        resourceName: kite-pg-postgresql
+
+  - id: cost-center
+    name: Cost Center
+    group: Products
+    description: Cost center frontend and account service dependency.
+    userFacing: true
+    checks:
+      - id: costcenter-frontend-ready
+        type: workload
+        name: Cost Center frontend
+        namespace: costcenter-frontend
+        kind: Deployment
+        resourceName: costcenter-frontend
+      - id: costcenter-frontend-endpoints
+        type: serviceEndpoints
+        name: Cost Center frontend endpoints
+        namespace: costcenter-frontend
+        serviceName: costcenter-frontend
+      - id: account-service-ready
+        type: workload
+        name: Account service
+        namespace: account-system
+        kind: Deployment
+        resourceName: account-service
+
+  - id: cronjob
+    name: CronJob
+    group: Products
+    description: CronJob product frontend and preview surface.
+    userFacing: true
+    checks:
+      - id: cronjob-ready
+        type: workload
+        name: CronJob frontend
+        namespace: cronjob
+        kind: Deployment
+        resourceName: cronjob
+      - id: cronjob-endpoints
+        type: serviceEndpoints
+        name: CronJob frontend endpoints
+        namespace: cronjob
+        serviceName: cronjob
+
+  - id: monitoring
+    name: Monitoring
+    group: Infrastructure
+    description: VictoriaMetrics query availability.
+    userFacing: false
+    checks:
+      - id: vm-query-up
+        type: prometheusQuery
+        name: VictoriaMetrics query path
+        query: up
+        warningBelow: 1
+        criticalBelow: 1

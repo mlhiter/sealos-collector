@@ -1,0 +1,36 @@
+server {
+  listen 8080;
+  server_name _;
+  absolute_redirect off;
+
+  location = /monitors {
+    return 302 /;
+  }
+
+  location = /monitors/ {
+    return 302 /;
+  }
+
+  location = /en/monitors {
+    return 302 /;
+  }
+
+  location = /en/monitors/ {
+    return 302 /;
+  }
+
+  location / {
+    proxy_http_version 1.1;
+    proxy_set_header Accept-Encoding "";
+    proxy_set_header Host __OPENSTATUS_PAGE_HOST__;
+    proxy_set_header X-Forwarded-Host __OPENSTATUS_PAGE_HOST__;
+    proxy_set_header X-Forwarded-Proto http;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_pass http://openstatus-status-page:3000;
+    sub_filter_once off;
+    sub_filter '</head>' '<style id="sealos-status-proxy-css">a[href="/monitors"],a[href="/en/monitors"]{display:none!important}[data-slot="status-event-content"]{gap:.375rem!important}[data-slot="status-event-timeline-report-update"] .mb-2{margin-bottom:.35rem!important}[data-slot="status-event-timeline-title"]{font-size:13px!important;line-height:1.35!important}[data-slot="status-event-timeline-message"]{padding-top:.125rem!important;padding-bottom:.25rem!important;font-size:12px!important;line-height:1.35!important}[data-slot="status-event-timeline-message"] .prose{font-family:inherit!important;font-size:12px!important;line-height:1.35!important;max-width:none!important}[data-slot="status-event-timeline-message"] .prose :where(p,ul){margin:.125rem 0!important}[data-slot="status-event-timeline-message"] .prose ul{padding-left:.875rem!important}[data-slot="status-event-timeline-message"] .prose li{margin:0!important;padding-left:.125rem!important}</style></head>';
+
+    proxy_hide_header Content-Security-Policy;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src *; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors *; connect-src 'self' https://*.ingest.us.sentry.io; worker-src 'self' blob:;" always;
+  }
+}
