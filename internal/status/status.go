@@ -40,6 +40,7 @@ type CheckResult struct {
 	ID         string            `json:"id"`
 	Name       string            `json:"name"`
 	Type       string            `json:"type"`
+	Impact     string            `json:"impact,omitempty"`
 	Status     Level             `json:"status"`
 	Message    string            `json:"message"`
 	ObservedAt time.Time         `json:"observedAt"`
@@ -51,6 +52,7 @@ type PublicCheckResult struct {
 	ID            string            `json:"id"`
 	Name          string            `json:"name"`
 	Type          string            `json:"type"`
+	Impact        string            `json:"impact,omitempty"`
 	Status        Level             `json:"status"`
 	Message       string            `json:"message"`
 	ReasonCode    string            `json:"reasonCode,omitempty"`

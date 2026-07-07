@@ -14,6 +14,8 @@
 - OpenStatus static page components and status reports as the default public
   status-page surface; OpenStatus monitor components are optional when real
   monitor runs are available.
+- Product health impact classifications: `servingPath`, `controlPlane`,
+  `dependency`, `symptom`, and `informational`.
 
 ## Example Sealos Evidence
 
@@ -24,4 +26,5 @@ The example configs reflect a common Sealos-style cluster shape with:
 - `dbprovider-frontend` namespace for Database frontend.
 - `vm` namespace for VictoriaMetrics services.
 
-Treat these as examples, not universal defaults.
+`configs/host.example.yaml` classifies every check with product impact values.
+Treat the namespaces and resource names as examples, not universal defaults.

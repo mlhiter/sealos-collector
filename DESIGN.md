@@ -19,8 +19,13 @@ Statuses are intentionally small:
 - `degraded`: the component is partially impaired.
 - `outage`: the component has no viable serving path.
 
-Component status is the worst status among its checks. Overall status is the
-worst status among components.
+Checks keep their raw status, then an optional check `impact` maps that signal
+to the component status. If `impact` is omitted, component status remains the
+worst raw check status for backward compatibility. This lets a direct serving
+path failure become an `outage`, while a controller, dependency, or warning
+symptom can make the product `degraded` without claiming that the direct user
+entry point is unavailable. Overall status is the worst status among
+components.
 
 A component with no checks is `unknown`, because the collector has no evidence
 that the user promise is healthy.
@@ -37,6 +42,16 @@ The collector can read:
 - HTTP endpoints from the collector runtime.
 - Prometheus-compatible query APIs.
 
+The collector can classify read-only checks by product impact:
+
+- `servingPath`: user entry point or data path; outage means the component may
+  be unavailable.
+- `controlPlane`: management or reconciliation path; outage degrades the
+  component.
+- `dependency`: supporting dependency; outage degrades the component.
+- `symptom`: derived warning or metric signal; outage degrades the component.
+- `informational`: published evidence that does not change component status.
+
 The collector must not:
 
 - Read Secrets.
@@ -52,7 +67,7 @@ snapshot. Public pages should normally set it to `false`; private dashboards may
 set it to `true`.
 
 Public snapshots still include `publicChecks`: a sanitized, whitelisted view of
-check status, public-safe messages, safe metadata, and structured incident
+raw check status, check impact, public-safe messages, safe metadata, and structured incident
 semantics. The collector emits `reasonCode`, `impactHint`, `signalSummary`, and
 `confidence` for non-operational checks so adapters do not need to parse raw
 logs or Kubernetes event text. Public updates must not expose credentials,

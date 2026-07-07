@@ -28,7 +28,7 @@
 
 ## Phase 4: Product-Aware Sealos Checks
 
-- Add first-class Sealos component presets.
+- Add first-class Sealos component presets with product-impact classifications.
 - Add certificate and ingress expiry checks.
 - Add product journey checks such as "create DevBox" or "list databases" where
   safe non-mutating probes exist.

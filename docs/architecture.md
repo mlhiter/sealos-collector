@@ -36,7 +36,9 @@ OpenStatus libSQL -> OpenStatus status-page UI
    config, or local `~/.kube/config`.
 3. Run each configured component check. Components without checks are marked
    `unknown` instead of healthy.
-4. Aggregate check status into component status.
+4. Map each raw check status through its optional product `impact`, then
+   aggregate the mapped values into component status. Unclassified checks keep
+   legacy worst-status behavior.
 5. Build `publicChecks` from a strict safe-metadata whitelist and attach
    structured `reasonCode`, `impactHint`, `signalSummary`, and `confidence`
    fields so public incident updates can summarize cause, impact, and signal
@@ -49,10 +51,14 @@ OpenStatus libSQL -> OpenStatus status-page UI
 
 ## Failure Handling
 
-Individual check failures become check statuses. A failed Prometheus query, for
-example, should not crash the collector. Transient `unknown` checks can use
-recent last-known state according to `statusPolicy`; repeated or stale unknown
-signals become `degraded` instead of producing endless public unknown noise.
+Individual check failures become raw check statuses. A failed Prometheus query,
+for example, should not crash the collector. The optional check `impact` field
+then translates raw status into user-facing component impact: `servingPath`
+keeps raw outages as outages; `controlPlane`, `dependency`, and `symptom`
+outages become degraded component status; `informational` signals do not change
+component status. Transient `unknown` checks can use recent last-known state
+according to `statusPolicy`; repeated or stale unknown signals become
+`degraded` instead of producing endless public unknown noise.
 The `recentWarnings` check treats Kubernetes Warning events as current evidence,
 not as a raw event-history counter: warnings for deleted, terminating, or
 completed Pods and common controller retry conflicts are ignored.

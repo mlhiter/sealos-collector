@@ -34,17 +34,20 @@ components:
     checks:
       - id: desktop-ready
         type: workload
+        impact: servingPath
         name: Desktop deployment
         namespace: sealos
         kind: Deployment
         resourceName: sealos-desktop
       - id: desktop-endpoints
         type: serviceEndpoints
+        impact: servingPath
         name: Desktop service endpoints
         namespace: sealos
         serviceName: sealos-desktop
       - id: console-http
         type: http
+        impact: servingPath
         name: Console external HTTP
         url: https://console.example.com
         expectedStatuses: [200, 302]
@@ -58,10 +61,12 @@ components:
     checks:
       - id: kube-readyz
         type: kubernetesReadyz
+        impact: controlPlane
         name: Kubernetes API readyz
         path: /readyz?verbose=true
       - id: recent-warnings
         type: recentWarnings
+        impact: symptom
         name: Recent actionable cluster warnings
         namespace: ""
         since: 15m
@@ -69,6 +74,7 @@ components:
         criticalCount: 20
       - id: apiserver-p99-latency
         type: prometheusQuery
+        impact: controlPlane
         name: Kubernetes API p99 latency
         query: max(cluster_quantile:apiserver_request_sli_duration_seconds:histogram_quantile{quantile="0.99"})
         warningAbove: 1
@@ -82,12 +88,14 @@ components:
     checks:
       - id: launchpad-frontend-ready
         type: workload
+        impact: servingPath
         name: Launchpad frontend
         namespace: applaunchpad-frontend
         kind: Deployment
         resourceName: applaunchpad-frontend
       - id: launchpad-monitor-ready
         type: workload
+        impact: dependency
         name: Launchpad monitor
         namespace: sealos
         kind: Deployment
@@ -101,12 +109,14 @@ components:
     checks:
       - id: dbprovider-ready
         type: workload
+        impact: servingPath
         name: Database frontend
         namespace: dbprovider-frontend
         kind: Deployment
         resourceName: dbprovider-frontend
       - id: database-monitor-ready
         type: workload
+        impact: dependency
         name: Database monitor
         namespace: sealos
         kind: Deployment
@@ -120,6 +130,7 @@ components:
     checks:
       - id: vm-query-up
         type: prometheusQuery
+        impact: dependency
         name: VictoriaMetrics query path
         # This in-cluster service name is expected to work from a collector Pod.
         # For local kubeconfig-only smoke tests, use a port-forwarded URL or

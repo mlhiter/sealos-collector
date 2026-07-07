@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -57,6 +58,7 @@ type CheckConfig struct {
 	Type             string   `yaml:"type"`
 	Name             string   `yaml:"name"`
 	Description      string   `yaml:"description"`
+	Impact           string   `yaml:"impact"`
 	Namespace        string   `yaml:"namespace"`
 	Kind             string   `yaml:"kind"`
 	ResourceName     string   `yaml:"resourceName"`
@@ -76,6 +78,14 @@ type CheckConfig struct {
 	WarningCount     int      `yaml:"warningCount"`
 	CriticalCount    int      `yaml:"criticalCount"`
 }
+
+const (
+	CheckImpactServingPath   = "servingPath"
+	CheckImpactControlPlane  = "controlPlane"
+	CheckImpactDependency    = "dependency"
+	CheckImpactSymptom       = "symptom"
+	CheckImpactInformational = "informational"
+)
 
 func Load(path string) (*Config, error) {
 	if path == "" {
@@ -141,6 +151,9 @@ func setDefaults(cfg *Config) {
 			if check.Name == "" {
 				check.Name = check.ID
 			}
+			if normalized := NormalizeCheckImpact(check.Impact); normalized != "" {
+				check.Impact = normalized
+			}
 			if check.Timeout == "" {
 				check.Timeout = cfg.Cluster.HTTP.Timeout
 			}
@@ -169,7 +182,38 @@ func validate(cfg *Config) error {
 			if check.Type == "" {
 				return fmt.Errorf("component %q check %q type is required", component.ID, check.ID)
 			}
+			if check.Impact != "" && NormalizeCheckImpact(check.Impact) == "" {
+				return fmt.Errorf("component %q check %q impact %q is not supported", component.ID, check.ID, check.Impact)
+			}
 		}
 	}
 	return nil
+}
+
+func NormalizeCheckImpact(value string) string {
+	normalized := ""
+	for _, char := range strings.ToLower(strings.TrimSpace(value)) {
+		switch char {
+		case '-', '_', ' ':
+			continue
+		default:
+			normalized += string(char)
+		}
+	}
+	switch normalized {
+	case "":
+		return ""
+	case "servingpath":
+		return CheckImpactServingPath
+	case "controlplane":
+		return CheckImpactControlPlane
+	case "dependency":
+		return CheckImpactDependency
+	case "symptom":
+		return CheckImpactSymptom
+	case "informational":
+		return CheckImpactInformational
+	default:
+		return ""
+	}
 }

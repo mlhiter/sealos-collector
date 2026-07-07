@@ -139,6 +139,7 @@ The collector writes a JSON document shaped for public status consumers:
           "id": "console-http",
           "name": "Console external HTTP",
           "type": "http",
+          "impact": "servingPath",
           "status": "operational",
           "message": "http returned 200",
           "signalSummary": "Console external HTTP HTTP 200",
@@ -190,6 +191,23 @@ Supported check types include:
 | `http` | External or internal HTTP status checks. |
 | `prometheusQuery` | Prometheus-compatible instant query thresholds. |
 | `recentWarnings` | Current actionable Kubernetes Warning events. |
+
+Each check may also set an `impact` value. This does not change the raw check
+result; it tells the collector how that raw signal should affect the
+user-facing component status:
+
+| Impact | Use for | Component effect |
+| --- | --- | --- |
+| `servingPath` | Entry points and data paths required for users to use the product. | Raw outage remains `outage`. |
+| `controlPlane` | Controllers and management paths used to create or change product resources. | Raw outage becomes `degraded`. |
+| `dependency` | Supporting services that can degrade the product but are not the direct entry point. | Raw outage becomes `degraded`. |
+| `symptom` | Warning events and derived metrics that indicate risk rather than direct failure. | Raw outage becomes `degraded`. |
+| `informational` | Evidence that should be published but should not affect the component status. | Does not degrade the component. |
+
+When `impact` is omitted, the collector preserves legacy behavior and uses the
+raw check status directly. The host example classifies the full Sealos product
+profile so public status reflects user-facing product promises rather than only
+internal object readiness.
 
 ## OpenStatus sync
 

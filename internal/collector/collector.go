@@ -106,7 +106,7 @@ func (c *Collector) collectComponent(ctx context.Context, componentConfig config
 		result := c.runCheck(ctx, checkConfig)
 		result = c.stabilizeCheck(componentConfig.ID, result)
 		results = append(results, result)
-		componentStatus = status.Worse(componentStatus, result.Status)
+		componentStatus = status.Worse(componentStatus, componentStatusForCheck(result))
 	}
 
 	return status.Component{
@@ -128,6 +128,7 @@ func (c *Collector) runCheck(ctx context.Context, check config.CheckConfig) stat
 		ID:         check.ID,
 		Name:       check.Name,
 		Type:       check.Type,
+		Impact:     config.NormalizeCheckImpact(check.Impact),
 		Status:     status.Unknown,
 		ObservedAt: started.UTC(),
 		Metadata:   map[string]string{},
@@ -669,6 +670,7 @@ func publicCheckResults(component config.ComponentConfig, componentStatus status
 			ID:            result.ID,
 			Name:          result.Name,
 			Type:          result.Type,
+			Impact:        result.Impact,
 			Status:        result.Status,
 			Message:       publicCheckMessage(result),
 			ReasonCode:    semantics.reasonCode,
@@ -697,8 +699,25 @@ func publicCheckSemantics(component config.ComponentConfig, componentStatus stat
 		return semantics
 	}
 	semantics.reasonCode = reasonCodeForCheck(result)
-	semantics.impactHint = impactHintForComponent(component, componentStatus)
+	semantics.impactHint = impactHintForCheck(component, componentStatus, result)
 	return semantics
+}
+
+func componentStatusForCheck(result status.CheckResult) status.Level {
+	if result.Status == status.Operational {
+		return status.Operational
+	}
+	switch result.Impact {
+	case config.CheckImpactControlPlane, config.CheckImpactDependency, config.CheckImpactSymptom:
+		if result.Status == status.Outage {
+			return status.Degraded
+		}
+		return result.Status
+	case config.CheckImpactInformational:
+		return status.Operational
+	default:
+		return result.Status
+	}
 }
 
 func publicCheckMessage(result status.CheckResult) string {
@@ -767,6 +786,21 @@ func reasonCodeForCheck(result status.CheckResult) string {
 	default:
 		return "check_failed"
 	}
+}
+
+func impactHintForCheck(component config.ComponentConfig, componentStatus status.Level, result status.CheckResult) string {
+	if result.Impact == config.CheckImpactInformational || componentStatus == status.Operational {
+		return fmt.Sprintf("%s has no confirmed user impact from this signal", component.Name)
+	}
+	switch result.Impact {
+	case config.CheckImpactControlPlane:
+		return fmt.Sprintf("%s management operations may be degraded", component.Name)
+	case config.CheckImpactDependency:
+		return fmt.Sprintf("%s dependencies may be degraded", component.Name)
+	case config.CheckImpactSymptom:
+		return fmt.Sprintf("%s may be degraded if this symptom persists", component.Name)
+	}
+	return impactHintForComponent(component, componentStatus)
 }
 
 func impactHintForComponent(component config.ComponentConfig, componentStatus status.Level) string {
@@ -997,6 +1031,9 @@ func summarize(level status.Level, checks []status.CheckResult) string {
 	}
 	switch level {
 	case status.Operational:
+		if hasNonOperationalCheck(checks) {
+			return "No user-facing impact detected"
+		}
 		return "All checks passed"
 	case status.Unknown:
 		return "Some checks could not be evaluated"
@@ -1007,6 +1044,15 @@ func summarize(level status.Level, checks []status.CheckResult) string {
 	default:
 		return "Status is unknown"
 	}
+}
+
+func hasNonOperationalCheck(checks []status.CheckResult) bool {
+	for _, check := range checks {
+		if check.Status != status.Operational {
+			return true
+		}
+	}
+	return false
 }
 
 func buildKubeConfig(cfg *config.Config) (*rest.Config, error) {

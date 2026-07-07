@@ -57,6 +57,18 @@ local file before adding private cluster values:
 cp configs/host.example.yaml configs/my-cluster.local.yaml
 ```
 
+The host example is the full Sealos Product Health Profile. Every check carries
+an `impact` value so raw platform evidence maps to user-facing status:
+
+- `servingPath`: direct product entry point or data path.
+- `controlPlane`: management/controller path; failures degrade the product.
+- `dependency`: supporting service; failures degrade the product.
+- `symptom`: warning or derived metric; failures degrade the product.
+- `informational`: evidence only; failures do not degrade the product.
+
+Leave `impact` empty only when you intentionally want legacy behavior where the
+component status is the worst raw check status.
+
 Use a Prometheus-compatible URL reachable from the host. Host processes often
 cannot resolve Kubernetes `*.svc` DNS names, so use a port-forward, load
 balancer, or in-network proxy when needed.

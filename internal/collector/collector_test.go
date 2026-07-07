@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -160,6 +161,9 @@ func TestCollectKeepsPublicChecksWhenDetailedChecksHidden(t *testing.T) {
 		t.Fatalf("PublicChecks length = %d, want 1", len(component.PublicChecks))
 	}
 	public := component.PublicChecks[0]
+	if public.Impact != "" {
+		t.Fatalf("Impact = %q, want empty legacy impact", public.Impact)
+	}
 	if public.Metadata["host"] == "" || public.Metadata["statusCode"] != "500" {
 		t.Fatalf("public metadata = %#v, want host and statusCode", public.Metadata)
 	}
@@ -179,6 +183,250 @@ func TestCollectKeepsPublicChecksWhenDetailedChecksHidden(t *testing.T) {
 		if strings.Contains(key, "token") || strings.Contains(value, "secret") || strings.Contains(value, "token") {
 			t.Fatalf("public metadata leaked sensitive query: %#v", public.Metadata)
 		}
+	}
+}
+
+func TestCollectIncludesNormalizedImpactAndStillHidesDetailedChecks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	c := &Collector{
+		cfg: &config.Config{
+			Cluster: config.ClusterConfig{
+				ID:   "dev-test",
+				Name: "Dev Test",
+				HTTP: config.HTTPConfig{Timeout: "1s"},
+			},
+			Publish: config.PublishConfig{IncludeCheckDetails: false},
+			Components: []config.ComponentConfig{
+				{
+					ID:         "console",
+					Name:       "Console",
+					UserFacing: true,
+					Checks: []config.CheckConfig{
+						{
+							ID:               "console-http",
+							Name:             "Console external HTTP",
+							Type:             "http",
+							Impact:           "serving-path",
+							URL:              server.URL + "/health?token=secret",
+							ExpectedStatuses: []int{http.StatusOK},
+						},
+					},
+				},
+			},
+		},
+		state: &StateStore{
+			state: persistedState{
+				Version: "v1",
+				Checks:  map[string]checkState{},
+			},
+		},
+	}
+
+	snapshot, err := c.Collect(context.Background())
+	if err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	component := snapshot.Components[0]
+	if len(component.Checks) != 0 {
+		t.Fatalf("Checks length = %d, want hidden detailed checks", len(component.Checks))
+	}
+	public := component.PublicChecks[0]
+	if public.Impact != config.CheckImpactServingPath {
+		t.Fatalf("Impact = %q, want %q", public.Impact, config.CheckImpactServingPath)
+	}
+	raw, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("Marshal snapshot: %v", err)
+	}
+	text := string(raw)
+	for _, forbidden := range []string{"token", "secret", "/health?", `"checks"`} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("public snapshot leaked %q: %s", forbidden, text)
+		}
+	}
+}
+
+func TestUnclassifiedCheckPreservesLegacyWorstStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	c := collectorWithHTTPCheck()
+
+	component := c.collectComponent(context.Background(), config.ComponentConfig{
+		ID:         "console",
+		Name:       "Console",
+		UserFacing: true,
+		Checks: []config.CheckConfig{
+			{
+				ID:               "console-http",
+				Name:             "Console external HTTP",
+				Type:             "http",
+				URL:              server.URL,
+				ExpectedStatuses: []int{http.StatusOK},
+			},
+		},
+	})
+
+	if component.Status != status.Outage {
+		t.Fatalf("Status = %s, want legacy raw outage", component.Status)
+	}
+}
+
+func TestServingPathImpactKeepsOutage(t *testing.T) {
+	result := status.CheckResult{Status: status.Outage, Impact: config.CheckImpactServingPath}
+
+	if got := componentStatusForCheck(result); got != status.Outage {
+		t.Fatalf("componentStatusForCheck() = %s, want outage", got)
+	}
+}
+
+func TestComponentStatusForCheckMapsImpactToComponentStatus(t *testing.T) {
+	tests := []struct {
+		name      string
+		rawStatus status.Level
+		impact    string
+		want      status.Level
+	}{
+		{name: "legacy outage", rawStatus: status.Outage, impact: "", want: status.Outage},
+		{name: "legacy degraded", rawStatus: status.Degraded, impact: "", want: status.Degraded},
+		{name: "legacy unknown", rawStatus: status.Unknown, impact: "", want: status.Unknown},
+		{name: "serving path outage", rawStatus: status.Outage, impact: config.CheckImpactServingPath, want: status.Outage},
+		{name: "control plane outage degrades", rawStatus: status.Outage, impact: config.CheckImpactControlPlane, want: status.Degraded},
+		{name: "dependency outage degrades", rawStatus: status.Outage, impact: config.CheckImpactDependency, want: status.Degraded},
+		{name: "symptom outage degrades", rawStatus: status.Outage, impact: config.CheckImpactSymptom, want: status.Degraded},
+		{name: "informational outage ignored", rawStatus: status.Outage, impact: config.CheckImpactInformational, want: status.Operational},
+		{name: "informational degraded ignored", rawStatus: status.Degraded, impact: config.CheckImpactInformational, want: status.Operational},
+		{name: "informational unknown ignored", rawStatus: status.Unknown, impact: config.CheckImpactInformational, want: status.Operational},
+		{name: "operational stays operational", rawStatus: status.Operational, impact: config.CheckImpactControlPlane, want: status.Operational},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := componentStatusForCheck(status.CheckResult{Status: tt.rawStatus, Impact: tt.impact})
+			if got != tt.want {
+				t.Fatalf("componentStatusForCheck() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestControlPlaneDependencyAndSymptomImpactsDegradeOutage(t *testing.T) {
+	for _, impact := range []string{
+		config.CheckImpactControlPlane,
+		config.CheckImpactDependency,
+		config.CheckImpactSymptom,
+	} {
+		t.Run(impact, func(t *testing.T) {
+			result := status.CheckResult{Status: status.Outage, Impact: impact}
+			if got := componentStatusForCheck(result); got != status.Degraded {
+				t.Fatalf("componentStatusForCheck() = %s, want degraded", got)
+			}
+		})
+	}
+}
+
+func TestInformationalImpactDoesNotAffectComponentStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	c := collectorWithHTTPCheck()
+
+	component := c.collectComponent(context.Background(), config.ComponentConfig{
+		ID:          "monitoring",
+		Name:        "Monitoring",
+		Description: "VictoriaMetrics query availability.",
+		UserFacing:  false,
+		Checks: []config.CheckConfig{
+			{
+				ID:               "dashboard-note",
+				Name:             "Dashboard note",
+				Type:             "http",
+				Impact:           config.CheckImpactInformational,
+				URL:              server.URL,
+				ExpectedStatuses: []int{http.StatusOK},
+			},
+		},
+	})
+
+	if component.Status != status.Operational {
+		t.Fatalf("Status = %s, want operational for informational failure", component.Status)
+	}
+	if component.Summary != "No user-facing impact detected" {
+		t.Fatalf("Summary = %q, want no-impact summary", component.Summary)
+	}
+	if len(component.PublicChecks) != 1 {
+		t.Fatalf("PublicChecks length = %d, want 1", len(component.PublicChecks))
+	}
+	public := component.PublicChecks[0]
+	if public.Status != status.Outage || public.Impact != config.CheckImpactInformational {
+		t.Fatalf("public status/impact = %s/%q, want outage/informational", public.Status, public.Impact)
+	}
+	if public.ImpactHint != "Monitoring has no confirmed user impact from this signal" {
+		t.Fatalf("ImpactHint = %q, want no-impact hint", public.ImpactHint)
+	}
+}
+
+func TestControlPlaneImpactDegradesComponentButKeepsRawCheckStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "down", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	c := collectorWithHTTPCheck()
+
+	component := c.collectComponent(context.Background(), config.ComponentConfig{
+		ID:          "devbox",
+		Name:        "DevBox",
+		Description: "Cloud development environment product surface.",
+		UserFacing:  true,
+		Checks: []config.CheckConfig{
+			{
+				ID:               "devbox-controller",
+				Name:             "DevBox controller",
+				Type:             "http",
+				Impact:           config.CheckImpactControlPlane,
+				URL:              server.URL,
+				ExpectedStatuses: []int{http.StatusOK},
+			},
+		},
+	})
+
+	if component.Status != status.Degraded {
+		t.Fatalf("Status = %s, want degraded", component.Status)
+	}
+	public := component.PublicChecks[0]
+	if public.Status != status.Outage {
+		t.Fatalf("Public check status = %s, want raw outage", public.Status)
+	}
+	if public.Impact != config.CheckImpactControlPlane {
+		t.Fatalf("Public check impact = %q, want controlPlane", public.Impact)
+	}
+	if public.ImpactHint != "DevBox management operations may be degraded" {
+		t.Fatalf("ImpactHint = %q, want management degraded hint", public.ImpactHint)
+	}
+}
+
+func collectorWithHTTPCheck() *Collector {
+	return &Collector{
+		cfg: &config.Config{
+			Cluster: config.ClusterConfig{
+				HTTP: config.HTTPConfig{Timeout: "1s"},
+			},
+		},
+		state: &StateStore{
+			state: persistedState{
+				Version: "v1",
+				Checks:  map[string]checkState{},
+			},
+		},
 	}
 }
 

@@ -24,6 +24,9 @@ component state:
 
 - Overall platform status.
 - User-facing component status.
+- Product-impact classification that keeps raw check evidence while mapping
+  serving paths, control planes, dependencies, symptoms, and informational
+  signals to the right public user impact.
 - Optional check-level evidence for private consumers.
 - Clear last-updated time for stale snapshot detection.
 - OpenStatus page components and status report lifecycle for the public page.
