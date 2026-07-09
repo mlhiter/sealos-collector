@@ -27,6 +27,10 @@ component state:
 - Product-impact classification that keeps raw check evidence while mapping
   serving paths, control planes, dependencies, symptoms, and informational
   signals to the right public user impact.
+- Public-safe signal explanations for metric threshold breaches and ignored
+  Kubernetes Warning noise.
+- State hygiene that removes last-known check state after checks leave the
+  current config.
 - Optional check-level evidence for private consumers.
 - Clear last-updated time for stale snapshot detection.
 - OpenStatus page components and status report lifecycle for the public page.

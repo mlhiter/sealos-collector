@@ -38,9 +38,11 @@ The collector can read:
 - Kubernetes API readiness.
 - Actionable Kubernetes Warning events. Historical warnings for deleted,
   terminating, or completed Pods and common controller retry conflicts do not
-  degrade the public page by themselves.
+  degrade the public page by themselves. The public surface may show aggregate
+  ignored-warning counters, but not raw event samples or object names.
 - HTTP endpoints from the collector runtime.
-- Prometheus-compatible query APIs.
+- Prometheus-compatible query APIs. Public metric evidence is the instant
+  sample and threshold relationship, not the raw PromQL expression.
 
 The collector can classify read-only checks by product impact:
 
@@ -67,12 +69,28 @@ snapshot. Public pages should normally set it to `false`; private dashboards may
 set it to `true`.
 
 Public snapshots still include `publicChecks`: a sanitized, whitelisted view of
-raw check status, check impact, public-safe messages, safe metadata, and structured incident
-semantics. The collector emits `reasonCode`, `impactHint`, `signalSummary`, and
-`confidence` for non-operational checks so adapters do not need to parse raw
-logs or Kubernetes event text. Public updates must not expose credentials,
-kubeconfigs, bearer tokens, raw request headers, Secret data, full internal
-queries, or raw warning samples.
+raw check status, check impact, public-safe messages, safe metadata, and
+structured incident semantics. The collector emits `reasonCode`, `impactHint`,
+`signalSummary`, and `confidence` for non-operational checks so adapters do not
+need to parse raw logs or Kubernetes event text. Public updates must not expose
+credentials, kubeconfigs, bearer tokens, raw request headers, Secret data, full
+internal queries, or raw warning samples.
+
+The safe metadata whitelist is intentionally specific. `prometheusQuery`
+publishes the sample value, threshold, threshold direction, threshold severity,
+and `sampleType=instant`. `recentWarnings` publishes actionable and ignored
+warning counts plus safe ignored-category counters such as deleted,
+terminating, completed, failed, and benign retry-conflict warnings. A single
+transient metric breach should be treated as an instant sample that needs the
+next collection pass to confirm persistence.
+
+## State Hygiene
+
+The optional collector state file exists only to stabilize transient `unknown`
+checks. State keys use `<componentID>/<checkID>` and are pruned after each
+collection pass against the current config. Removing or renaming a check should
+therefore remove its old last-known status instead of letting retired checks
+affect future snapshots.
 
 ## OpenStatus Integration
 

@@ -29,6 +29,10 @@ thin evidence layer between Kubernetes reality and a public status page.
 - Aggregates those checks into user-facing component statuses:
   `operational`, `unknown`, `degraded`, or `outage`.
 - Emits a public-safe `summary.json` snapshot with sanitized check evidence.
+- Explains public signals with safe warning-ignore counts and metric threshold
+  context instead of raw event or query text.
+- Keeps lightweight last-known state for transient `unknown` checks and prunes
+  state entries whose checks are no longer present in the current config.
 - Writes OpenStatus static page components and collector-owned status reports.
 - Keeps OpenStatus uptime monitors disabled by default until real monitor data
   exists.
@@ -76,6 +80,10 @@ go run ./cmd/sealos-collector \
   --interval 60s
 ```
 
+State keys are derived from `<componentID>/<checkID>`. Each collection pass
+keeps only keys that still exist in the current config, so removing a check from
+the config also removes its old stabilization state from `state.json`.
+
 Inspect the result:
 
 ```bash
@@ -114,6 +122,13 @@ Non-operational checks include structured public semantics such as
 `reasonCode`, `impactHint`, `signalSummary`, and `confidence`. The OpenStatus
 adapter renders those fields into compact Incident Digest updates without
 parsing raw Kubernetes event text.
+
+Prometheus/VictoriaMetrics checks expose only the instant sample value and the
+threshold relationship that fired, for example `value 1.105 > warning threshold
+1`. Recent Warning checks publish actionable warning counts plus safe ignored
+warning categories such as deleted, terminating, completed, failed, or benign
+retry-conflict objects. They do not publish raw warning samples on the public
+surface.
 
 ## Snapshot format
 
@@ -191,6 +206,12 @@ Supported check types include:
 | `http` | External or internal HTTP status checks. |
 | `prometheusQuery` | Prometheus-compatible instant query thresholds. |
 | `recentWarnings` | Current actionable Kubernetes Warning events. |
+
+`prometheusQuery` public metadata includes the instant sample, threshold,
+threshold direction, threshold severity, and `sampleType=instant`; it does not
+publish the PromQL string. `recentWarnings` public metadata includes actionable
+and ignored warning counts, including safe ignored-category counters, but not
+pod names or raw event messages.
 
 Each check may also set an `impact` value. This does not change the raw check
 result; it tells the collector how that raw signal should affect the

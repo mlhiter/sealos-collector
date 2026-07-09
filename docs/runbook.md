@@ -157,6 +157,9 @@ snapshots with atomic rename; a file-level Docker bind mount can keep
 `openstatus-sync` pinned to an old inode. The same directory also holds
 `state.json`, which lets the collector suppress transient `unknown` noise by
 using recent last-known component evidence before marking a signal stale.
+`state.json` is keyed by `<componentID>/<checkID>` and is pruned on every
+collection pass against the current config. If an old check disappears from the
+config, its last-known status should disappear from state as well.
 
 The self-hosted OpenStatus status-page image sends a production CSP with
 `upgrade-insecure-requests`. When the dev page is served over plain HTTP at
@@ -220,12 +223,21 @@ sentence, and at most two safe signals. Recovery stays one line. Keep
 `publish.includeCheckDetails: false` for public pages unless a private consumer
 explicitly needs raw check metadata.
 
+For `prometheusQuery`, public metadata shows the instant sample and the
+threshold relationship that fired, for example `value 1.105 > warning threshold
+1`, plus `sampleType=instant`. Treat one breach as a point-in-time signal and
+use the next collection pass to decide whether it is persistent. The public
+snapshot and OpenStatus digest must not include the raw PromQL expression.
+
 `recentWarnings` is intentionally current-state biased. It counts recent
 Warning events for active objects, but ignores warnings for deleted,
 terminating, or completed Pods and the common Kubernetes retry message
-`the object has been modified`. If the public page stays degraded, first check
-whether the referenced object still exists before treating the event as an
-active incident.
+`the object has been modified`. Public metadata may include safe counters such
+as `ignoredDeletedPodWarnings`, `ignoredTerminatingPodWarnings`,
+`ignoredCompletedPodWarnings`, `ignoredFailedPodWarnings`, and
+`ignoredBenignConflictWarnings`; it must not include raw pod names or event
+messages. If the public page stays degraded, first check whether the referenced
+object still exists before treating the event as an active incident.
 
 If a console endpoint uses a private or self-signed certificate, append that
 certificate to the collector container CA bundle instead of disabling TLS

@@ -925,6 +925,24 @@ func metricValue(metadata map[string]string) string {
 	if metadata["value"] == "" {
 		return ""
 	}
+	threshold := metadata["threshold"]
+	if threshold == "" {
+		threshold = metadata["thresholdValue"]
+	}
+	if threshold != "" {
+		severity := metadata["thresholdSeverity"]
+		if severity != "" {
+			severity += " "
+		}
+		switch metadata["thresholdDirection"] {
+		case "above":
+			return "value " + metadata["value"] + " > " + severity + "threshold " + threshold
+		case "below":
+			return "value " + metadata["value"] + " < " + severity + "threshold " + threshold
+		case "below_or_equal":
+			return "value " + metadata["value"] + " <= " + severity + "threshold " + threshold
+		}
+	}
 	return "value " + metadata["value"]
 }
 

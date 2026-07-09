@@ -20,6 +20,9 @@
 
 ## Phase 3: Publishing Hardening
 
+- Explain metric threshold breaches with public-safe instant sample metadata.
+- Publish aggregate ignored-warning categories without raw Warning samples.
+- Prune last-known state for checks that are no longer in the current config.
 - Add object-storage publishing targets such as S3/R2/OSS if another consumer
   needs snapshots.
 - Add signature support for snapshots.

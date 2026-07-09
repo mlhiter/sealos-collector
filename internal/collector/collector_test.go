@@ -186,6 +186,68 @@ func TestCollectKeepsPublicChecksWhenDetailedChecksHidden(t *testing.T) {
 	}
 }
 
+func TestCollectPrunesStateKeysMissingFromConfig(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	c := &Collector{
+		cfg: &config.Config{
+			Cluster: config.ClusterConfig{
+				ID:   "dev-test",
+				Name: "Dev Test",
+				HTTP: config.HTTPConfig{Timeout: "1s"},
+			},
+			Publish: config.PublishConfig{IncludeCheckDetails: true},
+			Components: []config.ComponentConfig{
+				{
+					ID:         "console",
+					Name:       "Console",
+					UserFacing: true,
+					Checks: []config.CheckConfig{
+						{
+							ID:               "http",
+							Name:             "Console external HTTP",
+							Type:             "http",
+							URL:              server.URL,
+							ExpectedStatuses: []int{http.StatusOK},
+							Timeout:          "1s",
+						},
+					},
+				},
+			},
+		},
+		state: &StateStore{
+			state: persistedState{
+				Version: "v1",
+				Checks: map[string]checkState{
+					"console/http": {
+						LastStatus:   status.Degraded,
+						LastMessage:  "previous signal",
+						LastObserved: time.Now().Add(-time.Minute),
+					},
+					"templates/template-gogs-ready": {
+						LastStatus:   status.Unknown,
+						LastMessage:  "removed config",
+						LastObserved: time.Now().Add(-time.Minute),
+					},
+				},
+			},
+		},
+	}
+
+	if _, err := c.Collect(context.Background()); err != nil {
+		t.Fatalf("Collect() error = %v", err)
+	}
+	if _, ok := c.state.state.Checks["templates/template-gogs-ready"]; ok {
+		t.Fatalf("stale state key was not pruned: %#v", c.state.state.Checks)
+	}
+	if got, ok := c.state.state.Checks["console/http"]; !ok || got.LastStatus != status.Operational {
+		t.Fatalf("active state key = %#v, want operational current check", c.state.state.Checks["console/http"])
+	}
+}
+
 func TestCollectIncludesNormalizedImpactAndStillHidesDetailedChecks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "down", http.StatusInternalServerError)
@@ -444,10 +506,16 @@ func TestPublicRecentWarningsExposeStructuredSemanticsWithoutSamples(t *testing.
 			Status:  status.Degraded,
 			Message: "2 recent warning events",
 			Metadata: map[string]string{
-				"warnings":        "2",
-				"ignoredWarnings": "1",
-				"since":           "15m",
-				"warningSample1":  "objectstorage-frontend/Pod example-storage-pod-abc: Failed: Error: ImagePullBackOff",
+				"warnings":                         "2",
+				"ignoredWarnings":                  "5",
+				"ignoredTerminatingPodWarnings":    "1",
+				"ignoredBenignConflictWarnings":    "1",
+				"ignoredDeletedPodWarnings":        "1",
+				"ignoredCompletedPodWarnings":      "1",
+				"ignoredFailedPodWarnings":         "1",
+				"ignoredPrivateImplementationNote": "should not be public",
+				"since":                            "15m",
+				"warningSample1":                   "objectstorage-frontend/Pod example-storage-pod-abc: Failed: Error: ImagePullBackOff",
 			},
 		},
 	})
@@ -459,7 +527,7 @@ func TestPublicRecentWarningsExposeStructuredSemanticsWithoutSamples(t *testing.
 	if got.ReasonCode != "image_pull_failure" {
 		t.Fatalf("ReasonCode = %q, want image_pull_failure", got.ReasonCode)
 	}
-	if got.SignalSummary != "Object Storage image pull failures; 2 warning events in 15m" {
+	if got.SignalSummary != "Object Storage image pull failures; 2 warning events in 15m; 5 ignored as historical noise" {
 		t.Fatalf("SignalSummary = %q, want product warning summary", got.SignalSummary)
 	}
 	if got.ImpactHint != "platform operations may be degraded; user-facing products can be affected if the signal persists" {
@@ -470,6 +538,20 @@ func TestPublicRecentWarningsExposeStructuredSemanticsWithoutSamples(t *testing.
 	}
 	if _, ok := got.Metadata["warningSample1"]; ok {
 		t.Fatalf("public metadata leaked warning sample: %#v", got.Metadata)
+	}
+	for _, key := range []string{
+		"ignoredTerminatingPodWarnings",
+		"ignoredBenignConflictWarnings",
+		"ignoredDeletedPodWarnings",
+		"ignoredCompletedPodWarnings",
+		"ignoredFailedPodWarnings",
+	} {
+		if got.Metadata[key] != "1" {
+			t.Fatalf("public metadata %s = %q, want safe ignored warning count", key, got.Metadata[key])
+		}
+	}
+	if _, ok := got.Metadata["ignoredPrivateImplementationNote"]; ok {
+		t.Fatalf("public metadata leaked non-whitelisted ignored warning key: %#v", got.Metadata)
 	}
 	for _, value := range []string{got.Message, got.SignalSummary, got.ImpactHint} {
 		if strings.Contains(value, "example-storage-pod-abc") {
@@ -582,8 +664,31 @@ func TestCheckRecentWarningsCountsActivePodWarnings(t *testing.T) {
 
 func TestCheckRecentWarningsIgnoresInactivePodAndRetryNoise(t *testing.T) {
 	now := metav1.Now()
+	deletingTime := metav1.Now()
 	c := &Collector{
 		kube: fake.NewSimpleClientset(
+			&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "desktop-terminating",
+					Namespace:         "sealos",
+					DeletionTimestamp: &deletingTime,
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+			},
+			&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "desktop-completed",
+					Namespace: "sealos",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodSucceeded},
+			},
+			&corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "desktop-failed",
+					Namespace: "sealos",
+				},
+				Status: corev1.PodStatus{Phase: corev1.PodFailed},
+			},
 			&corev1.Event{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "desktop-old-warning",
@@ -597,6 +702,51 @@ func TestCheckRecentWarningsIgnoresInactivePodAndRetryNoise(t *testing.T) {
 					Kind:      "Pod",
 					Namespace: "sealos",
 					Name:      "desktop-old",
+				},
+			},
+			&corev1.Event{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "desktop-terminating-warning",
+					Namespace: "sealos",
+				},
+				Type:          corev1.EventTypeWarning,
+				Reason:        "Unhealthy",
+				Message:       "Readiness probe failed",
+				LastTimestamp: now,
+				InvolvedObject: corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: "sealos",
+					Name:      "desktop-terminating",
+				},
+			},
+			&corev1.Event{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "desktop-completed-warning",
+					Namespace: "sealos",
+				},
+				Type:          corev1.EventTypeWarning,
+				Reason:        "Unhealthy",
+				Message:       "Readiness probe failed",
+				LastTimestamp: now,
+				InvolvedObject: corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: "sealos",
+					Name:      "desktop-completed",
+				},
+			},
+			&corev1.Event{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "desktop-failed-warning",
+					Namespace: "sealos",
+				},
+				Type:          corev1.EventTypeWarning,
+				Reason:        "Unhealthy",
+				Message:       "Readiness probe failed",
+				LastTimestamp: now,
+				InvolvedObject: corev1.ObjectReference{
+					Kind:      "Pod",
+					Namespace: "sealos",
+					Name:      "desktop-failed",
 				},
 			},
 			&corev1.Event{
@@ -626,8 +776,108 @@ func TestCheckRecentWarningsIgnoresInactivePodAndRetryNoise(t *testing.T) {
 	if level != status.Operational {
 		t.Fatalf("level = %s, want %s; message=%s", level, status.Operational, message)
 	}
-	if metadata["warnings"] != "0" || metadata["ignoredWarnings"] != "2" {
-		t.Fatalf("metadata = %#v, want two ignored warnings", metadata)
+	if metadata["warnings"] != "0" || metadata["ignoredWarnings"] != "5" {
+		t.Fatalf("metadata = %#v, want five ignored warnings", metadata)
+	}
+	wantIgnored := map[string]string{
+		"ignoredDeletedPodWarnings":     "1",
+		"ignoredTerminatingPodWarnings": "1",
+		"ignoredCompletedPodWarnings":   "1",
+		"ignoredFailedPodWarnings":      "1",
+		"ignoredBenignConflictWarnings": "1",
+	}
+	for key, want := range wantIgnored {
+		if metadata[key] != want {
+			t.Fatalf("metadata[%s] = %q, want %q in %#v", key, metadata[key], want, metadata)
+		}
+	}
+	if got := warningSignalSummary(metadata); got != "recent Kubernetes warning events; 0 warning events in 15m0s; 5 ignored as historical noise" {
+		t.Fatalf("warningSignalSummary() = %q, want ignored warning summary", got)
+	}
+}
+
+func TestCheckPrometheusQueryExposesThresholdMetadata(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query" {
+			t.Fatalf("path = %q, want /api/v1/query", r.URL.Path)
+		}
+		if r.URL.Query().Get("query") == "" {
+			t.Fatal("prometheus query parameter is required")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"status": "success",
+			"data": {
+				"result": [
+					{"value": [1720000000, "1.105"]}
+				]
+			}
+		}`))
+	}))
+	defer server.Close()
+
+	warningAbove := 1.0
+	criticalAbove := 3.0
+	c := &Collector{
+		cfg: &config.Config{
+			Cluster: config.ClusterConfig{
+				Prometheus: config.PrometheusConfig{Timeout: "1s"},
+			},
+		},
+	}
+
+	level, message, metadata := c.checkPrometheusQuery(context.Background(), config.CheckConfig{
+		URL:           server.URL,
+		Query:         `histogram_quantile(0.99, sum(rate(apiserver_request_duration_seconds_bucket{token="secret"}[5m])) by (le))`,
+		WarningAbove:  &warningAbove,
+		CriticalAbove: &criticalAbove,
+		Timeout:       "1s",
+	})
+
+	if level != status.Degraded {
+		t.Fatalf("level = %s, want %s; message=%s", level, status.Degraded, message)
+	}
+	if metadata["threshold"] != "1" || metadata["thresholdDirection"] != "above" || metadata["thresholdSeverity"] != "warning" || metadata["sampleType"] != "instant" {
+		t.Fatalf("metadata = %#v, want threshold explanation", metadata)
+	}
+
+	public := publicCheckResults(config.ComponentConfig{
+		ID:          "platform",
+		Name:        "Platform Control Plane",
+		Description: "Kubernetes API readiness and latency.",
+	}, level, []status.CheckResult{
+		{
+			ID:       "latency",
+			Name:     "Kubernetes API p99 latency",
+			Type:     "prometheusQuery",
+			Impact:   config.CheckImpactControlPlane,
+			Status:   level,
+			Message:  message,
+			Metadata: metadata,
+		},
+	})
+
+	if len(public) != 1 {
+		t.Fatalf("PublicChecks length = %d, want 1", len(public))
+	}
+	got := public[0]
+	if got.SignalSummary != "Kubernetes API p99 latency value 1.105 > warning threshold 1" {
+		t.Fatalf("SignalSummary = %q, want threshold summary", got.SignalSummary)
+	}
+	if got.ReasonCode != "metric_threshold_breached" {
+		t.Fatalf("ReasonCode = %q, want metric_threshold_breached", got.ReasonCode)
+	}
+	if got.Metadata["threshold"] != "1" || got.Metadata["thresholdDirection"] != "above" || got.Metadata["thresholdSeverity"] != "warning" || got.Metadata["sampleType"] != "instant" {
+		t.Fatalf("public metadata = %#v, want safe threshold fields", got.Metadata)
+	}
+	raw, err := json.Marshal(got)
+	if err != nil {
+		t.Fatalf("Marshal public check: %v", err)
+	}
+	for _, forbidden := range []string{"histogram_quantile", "token", "secret", "query"} {
+		if strings.Contains(string(raw), forbidden) {
+			t.Fatalf("public check leaked prometheus query detail %q: %s", forbidden, raw)
+		}
 	}
 }
 
@@ -710,6 +960,44 @@ func TestStateStoreTurnsRepeatedUnknownIntoDegraded(t *testing.T) {
 	}
 	if got.Metadata["stabilized"] != "false" || got.Metadata["unknownStreak"] != "3" {
 		t.Fatalf("metadata = %#v, want stale degraded signal", got.Metadata)
+	}
+}
+
+func TestStateStorePrunesStaleKeys(t *testing.T) {
+	now := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
+	store := &StateStore{
+		state: persistedState{
+			Version: "v1",
+			Checks: map[string]checkState{
+				"console/http": {
+					LastStatus:   status.Operational,
+					LastMessage:  "http returned 200",
+					LastObserved: now,
+				},
+				"templates/template-gogs-ready": {
+					LastStatus:   status.Degraded,
+					LastMessage:  "removed config",
+					LastObserved: now,
+				},
+			},
+		},
+	}
+
+	removed := store.Prune(map[string]struct{}{
+		"console/http": {},
+	})
+
+	if removed != 1 {
+		t.Fatalf("removed = %d, want 1", removed)
+	}
+	if !store.dirty {
+		t.Fatal("store.dirty = false, want true after pruning")
+	}
+	if _, ok := store.state.Checks["templates/template-gogs-ready"]; ok {
+		t.Fatalf("stale key was not pruned: %#v", store.state.Checks)
+	}
+	if _, ok := store.state.Checks["console/http"]; !ok {
+		t.Fatalf("active key was pruned: %#v", store.state.Checks)
 	}
 }
 

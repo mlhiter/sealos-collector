@@ -6,6 +6,8 @@
 - `deploy/rbac.yaml`: read-only Kubernetes permissions.
 - `deploy/cronjob.yaml`: sample in-cluster execution.
 - `cmd/openstatus-sync`: OpenStatus libSQL adapter.
+- `internal/collector/state.go`: lightweight last-known check state and stale
+  key pruning.
 
 ## External Concepts
 
@@ -14,6 +16,8 @@
 - OpenStatus static page components and status reports as the default public
   status-page surface; OpenStatus monitor components are optional when real
   monitor runs are available.
+- Public-safe signal semantics: metric threshold relationships and aggregate
+  ignored Warning counters, not raw PromQL or Warning samples.
 - Product health impact classifications: `servingPath`, `controlPlane`,
   `dependency`, `symptom`, and `informational`.
 

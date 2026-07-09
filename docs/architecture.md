@@ -43,9 +43,11 @@ OpenStatus libSQL -> OpenStatus status-page UI
    structured `reasonCode`, `impactHint`, `signalSummary`, and `confidence`
    fields so public incident updates can summarize cause, impact, and signal
    without publishing raw internal check details.
-6. Aggregate component status into overall status.
-7. Write JSON atomically to the configured output path.
-8. `openstatus-sync` reads the JSON snapshot and upserts OpenStatus workspace,
+6. Prune optional last-known check state against the current config so retired
+   checks cannot keep affecting future stabilization decisions.
+7. Aggregate component status into overall status.
+8. Write JSON atomically to the configured output path.
+9. `openstatus-sync` reads the JSON snapshot and upserts OpenStatus workspace,
    page, page components, component groups, and status reports. By default it
    uses static page components and keeps OpenStatus uptime monitors disabled.
 
@@ -61,7 +63,11 @@ according to `statusPolicy`; repeated or stale unknown signals become
 `degraded` instead of producing endless public unknown noise.
 The `recentWarnings` check treats Kubernetes Warning events as current evidence,
 not as a raw event-history counter: warnings for deleted, terminating, or
-completed Pods and common controller retry conflicts are ignored.
+completed Pods and common controller retry conflicts are ignored and summarized
+only as safe ignored-category counts. Prometheus-compatible checks use instant
+query samples; when a threshold fires, public metadata records the sample value,
+threshold, direction, severity, and `sampleType=instant` without storing the raw
+query text.
 
 Config, output write, or OpenStatus sync failures are process failures for the
 corresponding command.
@@ -94,8 +100,10 @@ collector-owned report and adds a resolved update. Non-operational updates are
 Incident Digests rendered from collector-provided `publicChecks` semantics: a
 headline cause, an impact sentence, and at most two safe signals. The syncer is
 a display adapter; warning-event classification and namespace-to-product mapping
-belong to the collector health model. Raw pod samples, image URLs, Prometheus
-hosts, and internal query details stay out of public status report messages.
+belong to the collector health model. Raw pod samples, image URLs, internal
+Prometheus query details, and ignored-warning samples stay out of public status
+report messages; metric digests use the collector-provided threshold
+relationship when available.
 Resolved updates are intentionally one line so public incident history stays
 dense. When a component is removed from collector scope, the syncer resolves its
 stale active collector-owned report so retired components do not stay on the

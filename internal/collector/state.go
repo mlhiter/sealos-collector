@@ -125,6 +125,24 @@ func (s *StateStore) StabilizeUnknown(key string, result status.CheckResult, pol
 	return result
 }
 
+func (s *StateStore) Prune(validKeys map[string]struct{}) int {
+	if s == nil || s.state.Checks == nil {
+		return 0
+	}
+	removed := 0
+	for key := range s.state.Checks {
+		if _, ok := validKeys[key]; ok {
+			continue
+		}
+		delete(s.state.Checks, key)
+		removed++
+	}
+	if removed > 0 {
+		s.dirty = true
+	}
+	return removed
+}
+
 func (s *StateStore) Save() error {
 	if s == nil || s.path == "" || !s.dirty {
 		return nil

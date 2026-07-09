@@ -24,5 +24,7 @@ Public pages should avoid:
 
 - Internal namespace names unless intentionally exposed.
 - Raw pod names.
+- Raw Kubernetes Warning messages or samples.
+- Raw PromQL expressions.
 - Stack traces.
 - Credential-like URLs or headers.

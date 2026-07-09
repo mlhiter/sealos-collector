@@ -179,22 +179,26 @@ func TestReportUpdateMessageUsesDigestForMetricSignal(t *testing.T) {
 				Name:          "Kubernetes API p99 latency",
 				Type:          "prometheusQuery",
 				Status:        status.Degraded,
-				Message:       "metric value 0.338",
+				Message:       "metric value 1.105 is above warning threshold",
 				ReasonCode:    "metric_threshold_breached",
 				ImpactHint:    "platform operations may be degraded; user-facing products can be affected if the signal persists",
-				SignalSummary: "Kubernetes API p99 latency value 0.338",
+				SignalSummary: "Kubernetes API p99 latency value 1.105 > warning threshold 1",
 				Confidence:    "measurement",
 				Metadata: map[string]string{
-					"host":  "prometheus.example.internal:8427",
-					"value": "0.338",
+					"host":               "prometheus.example.internal:8427",
+					"value":              "1.105",
+					"threshold":          "1",
+					"thresholdDirection": "above",
+					"thresholdSeverity":  "warning",
+					"sampleType":         "instant",
 				},
 			},
 		},
 	}, false)
 
 	for _, want := range []string{
-		"Platform Control Plane degraded: Kubernetes API p99 latency breached its health threshold value 0.338.",
-		"Signal: Kubernetes API p99 latency value 0.338.",
+		"Platform Control Plane degraded: Kubernetes API p99 latency breached its health threshold value 1.105 > warning threshold 1.",
+		"Signal: Kubernetes API p99 latency value 1.105 > warning threshold 1.",
 	} {
 		if !strings.Contains(message, want) {
 			t.Fatalf("message missing %q:\n%s", want, message)

@@ -65,6 +65,7 @@ func NewWithState(cfg *config.Config, statePath string) (*Collector, error) {
 func (c *Collector) Collect(ctx context.Context) (*status.Snapshot, error) {
 	components := make([]status.Component, 0, len(c.cfg.Components))
 	overall := status.Operational
+	configuredKeys := configuredCheckKeys(c.cfg.Components)
 
 	for _, componentConfig := range c.cfg.Components {
 		component := c.collectComponent(ctx, componentConfig)
@@ -88,11 +89,27 @@ func (c *Collector) Collect(ctx context.Context) (*status.Snapshot, error) {
 			snapshot.Components[i].Checks = nil
 		}
 	}
-	if err := c.state.Save(); err != nil {
-		return nil, fmt.Errorf("save state: %w", err)
+	if c.state != nil {
+		c.state.Prune(configuredKeys)
+		if err := c.state.Save(); err != nil {
+			return nil, fmt.Errorf("save state: %w", err)
+		}
 	}
 
 	return snapshot, nil
+}
+
+func configuredCheckKeys(components []config.ComponentConfig) map[string]struct{} {
+	keys := make(map[string]struct{})
+	for _, component := range components {
+		for _, check := range component.Checks {
+			if component.ID == "" || check.ID == "" {
+				continue
+			}
+			keys[checkStateKey(component.ID, check.ID)] = struct{}{}
+		}
+	}
+	return keys
 }
 
 func (c *Collector) collectComponent(ctx context.Context, componentConfig config.ComponentConfig) status.Component {
@@ -173,8 +190,12 @@ func (c *Collector) stabilizeCheck(componentID string, result status.CheckResult
 	if c.state == nil {
 		return result
 	}
-	key := componentID + "/" + result.ID
+	key := checkStateKey(componentID, result.ID)
 	return c.state.StabilizeUnknown(key, result, c.cfg.StatusPolicy, time.Now().UTC())
+}
+
+func checkStateKey(componentID, checkID string) string {
+	return componentID + "/" + checkID
 }
 
 func (c *Collector) checkWorkload(ctx context.Context, check config.CheckConfig) (status.Level, string, map[string]string) {
@@ -468,21 +489,33 @@ func (c *Collector) checkPrometheusQuery(ctx context.Context, check config.Check
 		"value": strconv.FormatFloat(value, 'f', -1, 64),
 	}
 	if check.CriticalBelow != nil && value < *check.CriticalBelow {
+		addThresholdMetadata(metadata, "below", "critical", *check.CriticalBelow)
 		return status.Outage, fmt.Sprintf("metric value %.4g is below critical threshold", value), metadata
 	}
 	if check.WarningBelow != nil && value < *check.WarningBelow {
+		addThresholdMetadata(metadata, "below", "warning", *check.WarningBelow)
 		return status.Degraded, fmt.Sprintf("metric value %.4g is below warning threshold", value), metadata
 	}
 	if check.CriticalAbove != nil && value > *check.CriticalAbove {
+		addThresholdMetadata(metadata, "above", "critical", *check.CriticalAbove)
 		return status.Outage, fmt.Sprintf("metric value %.4g is above critical threshold", value), metadata
 	}
 	if check.WarningAbove != nil && value > *check.WarningAbove {
+		addThresholdMetadata(metadata, "above", "warning", *check.WarningAbove)
 		return status.Degraded, fmt.Sprintf("metric value %.4g is above warning threshold", value), metadata
 	}
 	if check.CriticalBelow == nil && check.WarningBelow == nil && check.CriticalAbove == nil && check.WarningAbove == nil && value <= 0 {
+		addThresholdMetadata(metadata, "below_or_equal", "critical", 0)
 		return status.Outage, "metric value is not positive", metadata
 	}
 	return status.Operational, fmt.Sprintf("metric value %.4g", value), metadata
+}
+
+func addThresholdMetadata(metadata map[string]string, direction, severity string, threshold float64) {
+	metadata["thresholdDirection"] = direction
+	metadata["thresholdSeverity"] = severity
+	metadata["threshold"] = strconv.FormatFloat(threshold, 'f', -1, 64)
+	metadata["sampleType"] = "instant"
 }
 
 func prometheusQueryURL(baseURL string) string {
@@ -546,6 +579,7 @@ func (c *Collector) checkRecentWarnings(ctx context.Context, check config.CheckC
 
 	warnings := 0
 	ignoredWarnings := 0
+	ignoredWarningReasons := map[string]int{}
 	warningSamples := make([]string, 0, maxWarningSamples)
 	for _, event := range events.Items {
 		if event.Type != corev1.EventTypeWarning {
@@ -558,8 +592,9 @@ func (c *Collector) checkRecentWarnings(ctx context.Context, check config.CheckC
 		if eventTime.IsZero() || !eventTime.After(cutoff) {
 			continue
 		}
-		if c.shouldIgnoreWarningEvent(ctx, event) {
+		if reason, ignored := c.ignoredWarningReason(ctx, event); ignored {
 			ignoredWarnings++
+			ignoredWarningReasons[reason]++
 			continue
 		}
 		warnings++
@@ -574,6 +609,7 @@ func (c *Collector) checkRecentWarnings(ctx context.Context, check config.CheckC
 		"ignoredWarnings": strconv.Itoa(ignoredWarnings),
 		"since":           since.String(),
 	}
+	addIgnoredWarningMetadata(metadata, ignoredWarningReasons)
 	for index, sample := range warningSamples {
 		metadata[fmt.Sprintf("warningSample%d", index+1)] = sample
 	}
@@ -587,12 +623,17 @@ func (c *Collector) checkRecentWarnings(ctx context.Context, check config.CheckC
 }
 
 func (c *Collector) shouldIgnoreWarningEvent(ctx context.Context, event corev1.Event) bool {
+	_, ignored := c.ignoredWarningReason(ctx, event)
+	return ignored
+}
+
+func (c *Collector) ignoredWarningReason(ctx context.Context, event corev1.Event) (string, bool) {
 	if isBenignWarningEvent(event) {
-		return true
+		return "benignConflict", true
 	}
 
 	if event.InvolvedObject.Kind != "Pod" || event.InvolvedObject.Name == "" {
-		return false
+		return "", false
 	}
 
 	namespace := event.InvolvedObject.Namespace
@@ -600,17 +641,27 @@ func (c *Collector) shouldIgnoreWarningEvent(ctx context.Context, event corev1.E
 		namespace = event.Namespace
 	}
 	if namespace == "" {
-		return false
+		return "", false
 	}
 
 	pod, err := c.kube.CoreV1().Pods(namespace).Get(ctx, event.InvolvedObject.Name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return true
+		return "deletedPod", true
 	}
 	if err != nil {
-		return false
+		return "", false
 	}
-	return pod.DeletionTimestamp != nil || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed
+	if pod.DeletionTimestamp != nil {
+		return "terminatingPod", true
+	}
+	switch pod.Status.Phase {
+	case corev1.PodSucceeded:
+		return "completedPod", true
+	case corev1.PodFailed:
+		return "failedPod", true
+	default:
+		return "", false
+	}
 }
 
 func isBenignWarningEvent(event corev1.Event) bool {
@@ -639,6 +690,22 @@ func publicWarningSample(event corev1.Event) string {
 		parts = append(parts, message)
 	}
 	return strings.Join(parts, ": ")
+}
+
+func addIgnoredWarningMetadata(metadata map[string]string, reasons map[string]int) {
+	for reason, count := range reasons {
+		if count <= 0 {
+			continue
+		}
+		metadata["ignored"+capitalizeIdentifier(reason)+"Warnings"] = strconv.Itoa(count)
+	}
+}
+
+func capitalizeIdentifier(value string) string {
+	if value == "" {
+		return ""
+	}
+	return strings.ToUpper(value[:1]) + value[1:]
 }
 
 func publicEventMessage(message string) string {
@@ -748,9 +815,9 @@ func publicCheckMetadata(result status.CheckResult) map[string]string {
 	case "kubernetesreadyz":
 		return copyMetadataKeys(result.Metadata, "path")
 	case "prometheusquery":
-		return copyMetadataKeys(result.Metadata, "host", "value")
+		return copyMetadataKeys(result.Metadata, "host", "value", "threshold", "thresholdDirection", "thresholdSeverity", "sampleType")
 	case "recentwarnings":
-		return copyMetadataKeys(result.Metadata, "namespace", "warnings", "ignoredWarnings", "since")
+		return copyMetadataKeys(result.Metadata, "namespace", "warnings", "ignoredWarnings", "ignoredBenignConflictWarnings", "ignoredDeletedPodWarnings", "ignoredTerminatingPodWarnings", "ignoredCompletedPodWarnings", "ignoredFailedPodWarnings", "since")
 	default:
 		return nil
 	}
@@ -879,6 +946,24 @@ func metricValue(metadata map[string]string) string {
 	if metadata["value"] == "" {
 		return ""
 	}
+	threshold := metadata["threshold"]
+	if threshold == "" {
+		threshold = metadata["thresholdValue"]
+	}
+	if threshold != "" {
+		severity := metadata["thresholdSeverity"]
+		if severity != "" {
+			severity += " "
+		}
+		switch metadata["thresholdDirection"] {
+		case "above":
+			return "value " + metadata["value"] + " > " + severity + "threshold " + threshold
+		case "below":
+			return "value " + metadata["value"] + " < " + severity + "threshold " + threshold
+		case "below_or_equal":
+			return "value " + metadata["value"] + " <= " + severity + "threshold " + threshold
+		}
+	}
 	return "value " + metadata["value"]
 }
 
@@ -894,6 +979,9 @@ func warningSignalSummary(metadata map[string]string) string {
 	if count != "" {
 		parts = append(parts, count)
 	}
+	if ignored := ignoredWarningCount(metadata); ignored != "" {
+		parts = append(parts, ignored)
+	}
 	return strings.Join(parts, "; ")
 }
 
@@ -907,6 +995,14 @@ func warningCount(metadata map[string]string) string {
 		return warnings + " warning events"
 	}
 	return warnings + " warning events in " + since
+}
+
+func ignoredWarningCount(metadata map[string]string) string {
+	ignored := metadata["ignoredWarnings"]
+	if ignored == "" || ignored == "0" {
+		return ""
+	}
+	return ignored + " ignored as historical noise"
 }
 
 func warningClassification(metadata map[string]string) (string, string, string) {
