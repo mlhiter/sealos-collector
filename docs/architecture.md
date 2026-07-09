@@ -46,8 +46,11 @@ OpenStatus libSQL -> OpenStatus status-page UI
 6. Prune optional last-known check state against the current config so retired
    checks cannot keep affecting future stabilization decisions.
 7. Aggregate component status into overall status.
-8. Write JSON atomically to the configured output path.
-9. `openstatus-sync` reads the JSON snapshot and upserts OpenStatus workspace,
+8. Attach a public-safe freshness contract to the snapshot from collector
+   runtime settings.
+9. Write JSON atomically to the configured output path.
+10. `openstatus-sync` reads the JSON snapshot, evaluates freshness, adds a
+   generated Status Pipeline component, and upserts OpenStatus workspace,
    page, page components, component groups, and status reports. By default it
    uses static page components and keeps OpenStatus uptime monitors disabled.
 
@@ -72,6 +75,13 @@ query text.
 Config, output write, or OpenStatus sync failures are process failures for the
 corresponding command.
 
+Snapshot freshness failures are OpenStatus-facing pipeline failures. If
+`generatedAt` is older than `freshness.maxAgeSeconds`, or older than
+`--snapshot-max-age` for legacy snapshots without freshness metadata, the
+syncer marks the generated `Status Pipeline` component `degraded`. This does
+not mutate Kubernetes and does not claim that any product component is down; it
+means the public page may be lagging behind current cluster reality.
+
 ## Publishing Boundary
 
 The Kubernetes CronJob example writes the snapshot to stdout only. This keeps
@@ -89,6 +99,7 @@ user-facing page.
 - Snapshot component -> OpenStatus monitor page component only when
   `--show-uptime=true` and real OpenStatus monitor data is expected.
 - Snapshot group -> OpenStatus page component group.
+- Snapshot freshness -> generated OpenStatus `Status Pipeline` page component.
 - `operational` -> no active collector-owned status report.
 - `degraded` -> active status report with `degraded_performance` impact.
 - `outage` -> active status report with `major_outage` impact.
@@ -103,7 +114,8 @@ a display adapter; warning-event classification and namespace-to-product mapping
 belong to the collector health model. Raw pod samples, image URLs, internal
 Prometheus query details, and ignored-warning samples stay out of public status
 report messages; metric digests use the collector-provided threshold
-relationship when available.
+relationship when available. Freshness digests use only snapshot age,
+max-age seconds, and generated time, never local file paths or runtime secrets.
 Resolved updates are intentionally one line so public incident history stays
 dense. When a component is removed from collector scope, the syncer resolves its
 stale active collector-owned report so retired components do not stay on the

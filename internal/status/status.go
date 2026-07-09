@@ -20,8 +20,42 @@ type Snapshot struct {
 	Version       string      `json:"version"`
 	Cluster       Cluster     `json:"cluster"`
 	GeneratedAt   time.Time   `json:"generatedAt"`
+	Freshness     *Freshness  `json:"freshness,omitempty"`
 	OverallStatus Level       `json:"overallStatus"`
 	Components    []Component `json:"components"`
+}
+
+type Freshness struct {
+	ExpectedIntervalSeconds int64 `json:"expectedIntervalSeconds,omitempty"`
+	MaxAgeSeconds           int64 `json:"maxAgeSeconds,omitempty"`
+}
+
+func (s *Snapshot) SetFreshness(expectedInterval, maxAge time.Duration) {
+	if s == nil {
+		return
+	}
+	if expectedInterval <= 0 && maxAge <= 0 {
+		s.Freshness = nil
+		return
+	}
+	s.Freshness = &Freshness{
+		ExpectedIntervalSeconds: durationSeconds(expectedInterval),
+		MaxAgeSeconds:           durationSeconds(maxAge),
+	}
+}
+
+func (s *Snapshot) MaxAge(fallback time.Duration) time.Duration {
+	if s != nil && s.Freshness != nil && s.Freshness.MaxAgeSeconds > 0 {
+		return time.Duration(s.Freshness.MaxAgeSeconds) * time.Second
+	}
+	return fallback
+}
+
+func durationSeconds(value time.Duration) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return int64((value + time.Second - 1) / time.Second)
 }
 
 type Component struct {

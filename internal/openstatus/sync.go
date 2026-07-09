@@ -15,6 +15,13 @@ import (
 )
 
 const defaultReportTitlePrefix = "Sealos Collector:"
+const defaultSnapshotMaxAge = 5 * time.Minute
+
+const (
+	statusPipelineComponentID = "status-pipeline"
+	statusPipelineCheckID     = "snapshot-freshness"
+	statusPipelineGroup       = "Status"
+)
 
 var (
 	publicLineURLPattern         = regexp.MustCompile(`https?://[^\s"]+`)
@@ -30,6 +37,8 @@ type Options struct {
 	PageDescription   string
 	IncludeInternal   bool
 	ShowUptime        bool
+	SnapshotMaxAge    time.Duration
+	Now               func() time.Time
 	ReportTitlePrefix string
 }
 
@@ -57,6 +66,9 @@ func (o *Options) ApplyDefaults(snapshot *status.Snapshot) {
 	}
 	if o.ReportTitlePrefix == "" {
 		o.ReportTitlePrefix = defaultReportTitlePrefix
+	}
+	if o.SnapshotMaxAge <= 0 {
+		o.SnapshotMaxAge = defaultSnapshotMaxAge
 	}
 }
 
@@ -135,6 +147,9 @@ func (s *Syncer) Sync(ctx context.Context, snapshot *status.Snapshot) (*SyncResu
 	groupIDs := map[string]int64{}
 	groupOrder := map[string]int{}
 	components := filterComponents(snapshot.Components, options.IncludeInternal)
+	if freshness := statusPipelineComponent(snapshot, options.now(), options.SnapshotMaxAge); freshness.ID != "" {
+		components = append(components, freshness)
+	}
 	sort.SliceStable(components, func(i, j int) bool {
 		if components[i].Group == components[j].Group {
 			return components[i].Name < components[j].Name
@@ -198,6 +213,13 @@ func (s *Syncer) Sync(ctx context.Context, snapshot *status.Snapshot) (*SyncResu
 	return result, nil
 }
 
+func (o Options) now() time.Time {
+	if o.Now != nil {
+		return o.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 func filterComponents(components []status.Component, includeInternal bool) []status.Component {
 	filtered := make([]status.Component, 0, len(components))
 	for _, component := range components {
@@ -206,6 +228,108 @@ func filterComponents(components []status.Component, includeInternal bool) []sta
 		}
 	}
 	return filtered
+}
+
+type snapshotFreshness struct {
+	enabled     bool
+	stale       bool
+	generatedAt time.Time
+	age         time.Duration
+	maxAge      time.Duration
+}
+
+func evaluateSnapshotFreshness(snapshot *status.Snapshot, now time.Time, fallbackMaxAge time.Duration) snapshotFreshness {
+	if fallbackMaxAge <= 0 {
+		fallbackMaxAge = defaultSnapshotMaxAge
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	evaluation := snapshotFreshness{
+		enabled:     true,
+		generatedAt: snapshot.GeneratedAt,
+		maxAge:      snapshot.MaxAge(fallbackMaxAge),
+	}
+	if evaluation.maxAge <= 0 {
+		evaluation.enabled = false
+		return evaluation
+	}
+	if evaluation.generatedAt.IsZero() {
+		evaluation.stale = true
+		return evaluation
+	}
+	evaluation.age = now.Sub(evaluation.generatedAt)
+	if evaluation.age < 0 {
+		evaluation.age = 0
+	}
+	evaluation.stale = evaluation.age > evaluation.maxAge
+	return evaluation
+}
+
+func statusPipelineComponent(snapshot *status.Snapshot, now time.Time, fallbackMaxAge time.Duration) status.Component {
+	evaluation := evaluateSnapshotFreshness(snapshot, now, fallbackMaxAge)
+	if !evaluation.enabled {
+		return status.Component{}
+	}
+
+	ageSeconds := durationSeconds(evaluation.age)
+	maxAgeSeconds := durationSeconds(evaluation.maxAge)
+	generatedAt := ""
+	if !evaluation.generatedAt.IsZero() {
+		generatedAt = evaluation.generatedAt.UTC().Format(time.RFC3339)
+	}
+
+	level := status.Operational
+	summary := "Status data is fresh"
+	message := "status data is fresh"
+	signal := fmt.Sprintf("snapshot age %ds within max age %ds", ageSeconds, maxAgeSeconds)
+	reasonCode := ""
+	impactHint := ""
+	if evaluation.stale {
+		level = status.Degraded
+		summary = "Status data is stale"
+		message = "status data is stale"
+		reasonCode = "snapshot_stale"
+		impactHint = "status page data may lag behind current platform health"
+		if evaluation.generatedAt.IsZero() {
+			signal = fmt.Sprintf("snapshot generatedAt is missing; max age %ds", maxAgeSeconds)
+		} else {
+			signal = fmt.Sprintf("snapshot age %ds exceeds max age %ds", ageSeconds, maxAgeSeconds)
+		}
+	}
+
+	metadata := map[string]string{
+		"ageSeconds":    strconv.FormatInt(ageSeconds, 10),
+		"maxAgeSeconds": strconv.FormatInt(maxAgeSeconds, 10),
+	}
+	if generatedAt != "" {
+		metadata["generatedAt"] = generatedAt
+	}
+
+	return status.Component{
+		ID:          statusPipelineComponentID,
+		Name:        "Status Pipeline",
+		Group:       statusPipelineGroup,
+		Description: "Freshness of collector snapshot data powering this status page.",
+		UserFacing:  true,
+		Status:      level,
+		Summary:     summary,
+		PublicChecks: []status.PublicCheckResult{
+			{
+				ID:            statusPipelineCheckID,
+				Name:          "Collector snapshot freshness",
+				Type:          "snapshotFreshness",
+				Impact:        "symptom",
+				Status:        level,
+				Message:       message,
+				ReasonCode:    reasonCode,
+				ImpactHint:    impactHint,
+				SignalSummary: signal,
+				Confidence:    "measurement",
+				Metadata:      metadata,
+			},
+		},
+	}
 }
 
 func (s *Syncer) ensureWorkspace(ctx context.Context, slug, name string) (int64, error) {
@@ -729,6 +853,11 @@ func structuredCauseForCheck(check status.PublicCheckResult) string {
 		return "Kubernetes API readiness failed"
 	case "metric_threshold_breached":
 		return joinWords(name, "breached its health threshold", evidence)
+	case "snapshot_stale":
+		if evidence != "" {
+			return joinWords(name, "is stale", "("+evidence+")")
+		}
+		return joinWords(name, "is stale")
 	case "image_pull_failure", "probe_failure", "container_restart", "recent_warning_events":
 		if subject := signalSubject(signal); subject != "" {
 			return subject + " detected"
@@ -821,6 +950,8 @@ func causeForCheck(check status.PublicCheckResult) string {
 			return "recent Kubernetes warning events crossed the threshold (" + count + ")"
 		}
 		return "recent Kubernetes warning events crossed the threshold"
+	case "snapshotfreshness":
+		return joinWords(name, "is stale")
 	default:
 		return joinWords(name, "check failed")
 	}
@@ -905,6 +1036,8 @@ func signalForCheck(check status.PublicCheckResult) string {
 		return joinWords(name, metricValue(check.Metadata))
 	case "recentwarnings":
 		return warningCount(check.Metadata)
+	case "snapshotfreshness":
+		return joinWords(name, snapshotFreshnessSignal(check.Metadata))
 	}
 	if check.Message != "" {
 		return name
@@ -944,6 +1077,15 @@ func metricValue(metadata map[string]string) string {
 		}
 	}
 	return "value " + metadata["value"]
+}
+
+func snapshotFreshnessSignal(metadata map[string]string) string {
+	age := metadata["ageSeconds"]
+	maxAge := metadata["maxAgeSeconds"]
+	if age == "" || maxAge == "" {
+		return "snapshot freshness"
+	}
+	return "snapshot age " + age + "s / max age " + maxAge + "s"
 }
 
 func warningCount(metadata map[string]string) string {
@@ -1115,6 +1257,13 @@ func int64List(values []int64) string {
 		parts = append(parts, strconv.FormatInt(value, 10))
 	}
 	return strings.Join(parts, ",")
+}
+
+func durationSeconds(value time.Duration) int64 {
+	if value <= 0 {
+		return 0
+	}
+	return int64((value + time.Second - 1) / time.Second)
 }
 
 func parseInt64(value string) (int64, error) {

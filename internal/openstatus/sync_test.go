@@ -209,6 +209,86 @@ func TestReportUpdateMessageUsesDigestForMetricSignal(t *testing.T) {
 	}
 }
 
+func TestStatusPipelineComponentReportsFreshSnapshot(t *testing.T) {
+	generatedAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	snapshot := &status.Snapshot{
+		GeneratedAt: generatedAt,
+		Freshness:   &status.Freshness{MaxAgeSeconds: 180},
+	}
+
+	component := statusPipelineComponent(snapshot, generatedAt.Add(90*time.Second), 5*time.Minute)
+
+	if component.ID != statusPipelineComponentID {
+		t.Fatalf("ID = %q, want status pipeline component", component.ID)
+	}
+	if component.Status != status.Operational {
+		t.Fatalf("Status = %s, want operational", component.Status)
+	}
+	if len(component.PublicChecks) != 1 {
+		t.Fatalf("PublicChecks length = %d, want 1", len(component.PublicChecks))
+	}
+	check := component.PublicChecks[0]
+	if check.Status != status.Operational {
+		t.Fatalf("freshness check status = %s, want operational", check.Status)
+	}
+	if check.SignalSummary != "snapshot age 90s within max age 180s" {
+		t.Fatalf("SignalSummary = %q, want fresh age summary", check.SignalSummary)
+	}
+	if check.Metadata["generatedAt"] != "2026-07-09T08:00:00Z" {
+		t.Fatalf("metadata = %#v, want generatedAt", check.Metadata)
+	}
+}
+
+func TestStatusPipelineComponentDegradesStaleSnapshot(t *testing.T) {
+	generatedAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	snapshot := &status.Snapshot{
+		GeneratedAt: generatedAt,
+		Freshness:   &status.Freshness{MaxAgeSeconds: 180},
+	}
+
+	component := statusPipelineComponent(snapshot, generatedAt.Add(4*time.Minute), 5*time.Minute)
+
+	if component.Status != status.Degraded {
+		t.Fatalf("Status = %s, want degraded", component.Status)
+	}
+	check := component.PublicChecks[0]
+	if check.ReasonCode != "snapshot_stale" {
+		t.Fatalf("ReasonCode = %q, want snapshot_stale", check.ReasonCode)
+	}
+	if check.SignalSummary != "snapshot age 240s exceeds max age 180s" {
+		t.Fatalf("SignalSummary = %q, want stale age summary", check.SignalSummary)
+	}
+	message := reportUpdateMessage(component, false)
+	for _, want := range []string{
+		"Status Pipeline degraded: Collector snapshot freshness is stale (snapshot age 240s exceeds max age 180s).",
+		"Impact: status page data may lag behind current platform health.",
+		"Signal: snapshot age 240s exceeds max age 180s.",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("message missing %q:\n%s", want, message)
+		}
+	}
+	for _, notWant := range []string{"summary.json", "/home/", "token", "secret"} {
+		if strings.Contains(message, notWant) {
+			t.Fatalf("message leaked unsafe freshness detail %q:\n%s", notWant, message)
+		}
+	}
+}
+
+func TestStatusPipelineComponentUsesFallbackMaxAge(t *testing.T) {
+	generatedAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	snapshot := &status.Snapshot{GeneratedAt: generatedAt}
+
+	component := statusPipelineComponent(snapshot, generatedAt.Add(6*time.Minute), 5*time.Minute)
+
+	if component.Status != status.Degraded {
+		t.Fatalf("Status = %s, want degraded from fallback max age", component.Status)
+	}
+	if got := component.PublicChecks[0].Metadata["maxAgeSeconds"]; got != "300" {
+		t.Fatalf("maxAgeSeconds = %q, want fallback 300", got)
+	}
+}
+
 func TestReportUpdateMessageFallsBackConservativelyForLegacyWarningSamples(t *testing.T) {
 	message := reportUpdateMessage(status.Component{
 		Name:        "Platform Control Plane",
@@ -320,6 +400,7 @@ func TestReportUpdateMessageLegacyRecoveryDoesNotLeakRawDetailedCheckMessage(t *
 
 func TestSyncWithoutUptimeUsesStaticComponents(t *testing.T) {
 	var statements []string
+	now := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request pipelineRequest
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -359,6 +440,7 @@ func TestSyncWithoutUptimeUsesStaticComponents(t *testing.T) {
 		PageSlug:      "sealos-status",
 		PageTitle:     "Sealos Status",
 		ShowUptime:    false,
+		Now:           func() time.Time { return now },
 	})
 	if err != nil {
 		t.Fatalf("NewSyncer() error = %v", err)
@@ -366,7 +448,8 @@ func TestSyncWithoutUptimeUsesStaticComponents(t *testing.T) {
 
 	result, err := syncer.Sync(context.Background(), &status.Snapshot{
 		Version:     "v1",
-		GeneratedAt: time.Unix(100, 0).UTC(),
+		GeneratedAt: now,
+		Freshness:   &status.Freshness{MaxAgeSeconds: 180},
 		Cluster: status.Cluster{
 			ID:   "example-cluster",
 			Name: "Example Sealos Cluster",
@@ -385,8 +468,8 @@ func TestSyncWithoutUptimeUsesStaticComponents(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Sync() error = %v", err)
 	}
-	if result.Components != 1 {
-		t.Fatalf("Components = %d, want 1", result.Components)
+	if result.Components != 2 {
+		t.Fatalf("Components = %d, want app plus status pipeline", result.Components)
 	}
 
 	joined := strings.Join(statements, "\n")
@@ -402,6 +485,94 @@ func TestSyncWithoutUptimeUsesStaticComponents(t *testing.T) {
 	if !strings.Contains(joined, "UPDATE monitor SET active = 0, public = 0") {
 		t.Fatalf("sync did not disable collector monitor rows:\n%s", joined)
 	}
+	if !strings.Contains(joined, "Status Pipeline") {
+		t.Fatalf("sync did not include status pipeline freshness component:\n%s", joined)
+	}
+}
+
+func TestSyncCreatesFreshnessReportForStaleSnapshot(t *testing.T) {
+	var statements []string
+	now := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request pipelineRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if len(request.Requests) == 0 || request.Requests[0].Stmt == nil {
+			t.Errorf("request had no executable statement")
+			http.Error(w, "missing statement", http.StatusBadRequest)
+			return
+		}
+
+		sql := request.Requests[0].Stmt.SQL
+		statements = append(statements, sql)
+		response := pipelineResponse{
+			Results: []pipelineResult{
+				{
+					Type: "ok",
+					Response: pipelineResponseItem{
+						Type:   "execute",
+						Result: fakeSyncResult(sql),
+					},
+				},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	syncer, err := NewSyncer(Options{
+		DatabaseURL:   server.URL,
+		WorkspaceSlug: "sealos",
+		WorkspaceName: "Sealos",
+		PageSlug:      "sealos-status",
+		PageTitle:     "Sealos Status",
+		ShowUptime:    false,
+		Now:           func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewSyncer() error = %v", err)
+	}
+
+	result, err := syncer.Sync(context.Background(), &status.Snapshot{
+		Version:     "v1",
+		GeneratedAt: now.Add(-4 * time.Minute),
+		Freshness:   &status.Freshness{MaxAgeSeconds: 180},
+		Cluster: status.Cluster{
+			ID:   "example-cluster",
+			Name: "Example Sealos Cluster",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Sync() error = %v", err)
+	}
+	if result.Components != 1 {
+		t.Fatalf("Components = %d, want status pipeline only", result.Components)
+	}
+	if result.ReportsCreated != 1 {
+		t.Fatalf("ReportsCreated = %d, want stale freshness report", result.ReportsCreated)
+	}
+
+	joined := strings.Join(statements, "\n")
+	for _, want := range []string{
+		"Status Pipeline",
+		"Status Pipeline degraded",
+		"snapshot age 240s exceeds max age 180s",
+		"status page data may lag behind current platform health",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("sync statements missing %q:\n%s", want, joined)
+		}
+	}
+	for _, notWant := range []string{"/home/", "summary.json", "token", "secret"} {
+		if strings.Contains(joined, notWant) {
+			t.Fatalf("sync statements leaked unsafe freshness detail %q:\n%s", notWant, joined)
+		}
+	}
 }
 
 func fakeSyncResult(sql string) *ResultSet {
@@ -412,6 +583,14 @@ func fakeSyncResult(sql string) *ResultSet {
 		return resultWithInt64(2)
 	case strings.Contains(sql, "m.name = 'sealos-collector:app-launchpad'"):
 		return resultWithInt64(3)
+	case strings.Contains(sql, "INSERT INTO page_component_groups"):
+		return resultWithInt64(4)
+	case strings.Contains(sql, "INSERT INTO page_component"):
+		return resultWithInt64(5)
+	case strings.Contains(sql, "INSERT INTO status_report_update"):
+		return resultWithInt64(7)
+	case strings.Contains(sql, "INSERT INTO status_report "):
+		return resultWithInt64(6)
 	case strings.Contains(sql, "SELECT sr.id FROM status_report"):
 		return &ResultSet{}
 	case strings.Contains(sql, "pc.id NOT IN"):

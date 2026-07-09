@@ -15,6 +15,8 @@ Recommended groups:
 OpenStatus public pages should show:
 
 - Overall status.
+- Status Pipeline freshness when the public page is showing current data or
+  stale data.
 - User-facing and platform-internal components grouped by capability when the
   goal is whole-platform health.
 - Open collector-owned reports for degraded, outage, or unknown components.

@@ -1,6 +1,9 @@
 package status
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestCombineUsesWorstStatus(t *testing.T) {
 	tests := []struct {
@@ -21,5 +24,32 @@ func TestCombineUsesWorstStatus(t *testing.T) {
 				t.Fatalf("Combine() = %s, want %s", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestSnapshotSetFreshnessRoundsDurations(t *testing.T) {
+	snapshot := &Snapshot{}
+
+	snapshot.SetFreshness(61*time.Second, 181*time.Second+time.Millisecond)
+
+	if snapshot.Freshness == nil {
+		t.Fatal("Freshness = nil, want contract")
+	}
+	if snapshot.Freshness.ExpectedIntervalSeconds != 61 {
+		t.Fatalf("ExpectedIntervalSeconds = %d, want 61", snapshot.Freshness.ExpectedIntervalSeconds)
+	}
+	if snapshot.Freshness.MaxAgeSeconds != 182 {
+		t.Fatalf("MaxAgeSeconds = %d, want ceil seconds", snapshot.Freshness.MaxAgeSeconds)
+	}
+	if got := snapshot.MaxAge(5 * time.Minute); got != 182*time.Second {
+		t.Fatalf("MaxAge() = %s, want 182s", got)
+	}
+}
+
+func TestSnapshotMaxAgeUsesFallbackWhenContractMissing(t *testing.T) {
+	snapshot := &Snapshot{}
+
+	if got := snapshot.MaxAge(5 * time.Minute); got != 5*time.Minute {
+		t.Fatalf("MaxAge() = %s, want fallback", got)
 	}
 }

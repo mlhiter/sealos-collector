@@ -31,8 +31,10 @@ component state:
   Kubernetes Warning noise.
 - State hygiene that removes last-known check state after checks leave the
   current config.
+- Snapshot freshness self-observability so stale status data becomes visible as
+  a Status Pipeline degradation.
 - Optional check-level evidence for private consumers.
-- Clear last-updated time for stale snapshot detection.
+- Clear last-updated time and max-age metadata for stale snapshot detection.
 - OpenStatus page components and status report lifecycle for the public page.
 
 ## Non-Goals

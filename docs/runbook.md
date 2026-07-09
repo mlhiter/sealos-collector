@@ -161,6 +161,15 @@ using recent last-known component evidence before marking a signal stale.
 collection pass against the current config. If an old check disappears from the
 config, its last-known status should disappear from state as well.
 
+With `--interval 60s`, the collector writes
+`freshness.expectedIntervalSeconds=60` and defaults
+`freshness.maxAgeSeconds=180`. Use `--snapshot-max-age` on the collector when
+the runtime needs a different staleness budget. `openstatus-sync` reads that
+contract and adds a public `Status Pipeline` component. If the snapshot is
+older than `freshness.maxAgeSeconds`, it creates a degraded collector-owned
+report. For legacy snapshots without freshness metadata, `--snapshot-max-age`
+on the syncer is the fallback max age and defaults to five minutes.
+
 The self-hosted OpenStatus status-page image sends a production CSP with
 `upgrade-insecure-requests`. When the dev page is served over plain HTTP at
 the status host, browsers may upgrade `_next/static` CSS/JS requests to HTTPS
@@ -204,6 +213,7 @@ curl -s http://status.example.com/en/feed/json
 curl -s -o /dev/null -w '%{http_code} %{redirect_url}\n' \
   http://status.example.com/monitors
 curl -sI http://status.example.com/ | grep -i content-security-policy
+jq '{generatedAt, freshness}' /opt/sealos-collector/public/summary.json
 ```
 
 OpenStatus components do not store a direct collector-owned current-status
@@ -222,6 +232,29 @@ The collector always emits sanitized `publicChecks` with structured
 sentence, and at most two safe signals. Recovery stays one line. Keep
 `publish.includeCheckDetails: false` for public pages unless a private consumer
 explicitly needs raw check metadata.
+
+Snapshot freshness has its own status-page signal. The generated `Status
+Pipeline` component is `operational` when data is fresh and `degraded` when
+`generatedAt` exceeds the max age. A freshness degradation means the status page
+may be stale; first check collector logs, snapshot mtime, and whether the
+collector container is still running before investigating product incidents.
+
+To test freshness without touching Kubernetes or manually editing OpenStatus DB,
+stop only the collector container and wait longer than `freshness.maxAgeSeconds`
+plus one sync interval:
+
+```bash
+ssh "$REMOTE" '
+docker stop sealos-collector
+sleep 260
+docker logs --tail 20 sealos-openstatus-sync
+docker start sealos-collector
+'
+```
+
+After the next fresh collector tick, `openstatus-sync` should resolve the Status
+Pipeline report automatically. Do not leave the collector stopped after a
+freshness simulation.
 
 For `prometheusQuery`, public metadata shows the instant sample and the
 threshold relationship that fired, for example `value 1.105 > warning threshold

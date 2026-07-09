@@ -5,6 +5,8 @@
 - Public health is about user promises, not internal object names.
 - Internal evidence should be gathered read-only and published as a sanitized
   snapshot.
+- Public health also depends on freshness: an old green snapshot is not a valid
+  claim that the platform is currently healthy.
 - The public status page must remain outside the monitored cluster and be served
   by OpenStatus, not a collector-owned frontend.
 - Automatic checks provide facts and bounded health semantics; human incident
@@ -92,12 +94,27 @@ collection pass against the current config. Removing or renaming a check should
 therefore remove its old last-known status instead of letting retired checks
 affect future snapshots.
 
+## Freshness Model
+
+Every collector-run snapshot may include a `freshness` contract with the
+expected collection interval and max tolerated snapshot age in seconds. The
+collector derives the default max age from runtime settings: three collection
+intervals for repeated collection, or five minutes for one-shot snapshots.
+
+Freshness is not a Kubernetes health check. It is a status-page pipeline health
+signal owned by `openstatus-sync`. The syncer adds one public `Status Pipeline`
+component and marks it `degraded` when `generatedAt` is older than the max age.
+That degraded state says the public page may be stale; it must not be confused
+with a product outage in the monitored cluster.
+
 ## OpenStatus Integration
 
 OpenStatus is the public communication surface. The backend adapter maps
 snapshot components to OpenStatus static page components by default and maps
 non-operational component states to active status reports. It renders
 collector-provided incident semantics as dense Incident Digest updates instead
-of classifying warning samples itself. Recovery resolves the corresponding
-collector-owned report. OpenStatus monitor components are an optional mode for
-a later full uptime setup, not the default public display path.
+of classifying warning samples itself. It also renders the generated `Status
+Pipeline` freshness component so stale status data becomes visible and resolves
+when a fresh snapshot arrives. Recovery resolves the corresponding
+collector-owned report. OpenStatus monitor components are an optional mode for a
+later full uptime setup, not the default public display path.

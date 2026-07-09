@@ -29,6 +29,8 @@ thin evidence layer between Kubernetes reality and a public status page.
 - Aggregates those checks into user-facing component statuses:
   `operational`, `unknown`, `degraded`, or `outage`.
 - Emits a public-safe `summary.json` snapshot with sanitized check evidence.
+- Publishes a freshness contract so downstream status-page sync can detect
+  stale snapshots.
 - Explains public signals with safe warning-ignore counts and metric threshold
   context instead of raw event or query text.
 - Keeps lightweight last-known state for transient `unknown` checks and prunes
@@ -83,6 +85,11 @@ go run ./cmd/sealos-collector \
 State keys are derived from `<componentID>/<checkID>`. Each collection pass
 keeps only keys that still exist in the current config, so removing a check from
 the config also removes its old stabilization state from `state.json`.
+
+The collector also writes `freshness.expectedIntervalSeconds` and
+`freshness.maxAgeSeconds`. With `--interval 60s`, the default max age is 180s.
+Override it with `--snapshot-max-age` when a runtime needs a wider or tighter
+staleness budget.
 
 Inspect the result:
 
@@ -140,6 +147,10 @@ The collector writes a JSON document shaped for public status consumers:
   "cluster": {
     "id": "example-cluster",
     "name": "Example Sealos Cluster"
+  },
+  "freshness": {
+    "expectedIntervalSeconds": 60,
+    "maxAgeSeconds": 180
   },
   "overallStatus": "operational",
   "components": [
@@ -242,12 +253,19 @@ go run ./cmd/openstatus-sync \
   --workspace-name "Sealos" \
   --page-slug sealos-status \
   --page-title "Sealos Status" \
+  --snapshot-max-age 5m \
   --show-uptime=false
 ```
 
 With `--show-uptime=false`, the adapter uses static page components and keeps
 the unused Monitors page out of the public status experience. Enable uptime
 only after OpenStatus monitor runs are actually available.
+
+`openstatus-sync` always adds a public `Status Pipeline` component. It is
+`operational` while the snapshot is fresh. If `generatedAt` is older than
+`freshness.maxAgeSeconds`, or older than `--snapshot-max-age` for legacy
+snapshots without a freshness contract, it creates a collector-owned degraded
+report explaining that status-page data may lag behind current platform health.
 
 OpenStatus reports are collector-owned:
 

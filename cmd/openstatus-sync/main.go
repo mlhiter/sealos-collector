@@ -21,6 +21,7 @@ func main() {
 	var pageTitle string
 	var pageDescription string
 	var interval time.Duration
+	var snapshotMaxAge time.Duration
 	var includeInternal bool
 	var showUptime bool
 
@@ -32,6 +33,7 @@ func main() {
 	flag.StringVar(&pageTitle, "page-title", "", "OpenStatus status page title; defaults to snapshot cluster name")
 	flag.StringVar(&pageDescription, "page-description", "Sealos platform health collected from read-only cluster evidence.", "OpenStatus status page description")
 	flag.DurationVar(&interval, "interval", 0, "sync repeatedly at this interval; 0 runs once")
+	flag.DurationVar(&snapshotMaxAge, "snapshot-max-age", 5*time.Minute, "fallback max snapshot age when summary.json does not include freshness metadata")
 	flag.BoolVar(&includeInternal, "include-internal", true, "include non-user-facing platform components")
 	flag.BoolVar(&showUptime, "show-uptime", false, "show OpenStatus uptime/monitors page")
 	flag.Parse()
@@ -48,6 +50,7 @@ func main() {
 		PageDescription: pageDescription,
 		IncludeInternal: includeInternal,
 		ShowUptime:      showUptime,
+		SnapshotMaxAge:  snapshotMaxAge,
 	}
 	syncer, err := openstatus.NewSyncer(options)
 	if err != nil {

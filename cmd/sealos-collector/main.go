@@ -21,12 +21,14 @@ func main() {
 	var outputPath string
 	var statePath string
 	var interval time.Duration
+	var snapshotMaxAge time.Duration
 	var pretty bool
 
 	flag.StringVar(&configPath, "config", "configs/sealos.example.yaml", "path to collector config")
 	flag.StringVar(&outputPath, "output", "summary.json", "output path, or - for stdout")
 	flag.StringVar(&statePath, "state", "", "optional persisted collector state path")
 	flag.DurationVar(&interval, "interval", 0, "collect repeatedly at this interval; 0 runs once")
+	flag.DurationVar(&snapshotMaxAge, "snapshot-max-age", 0, "max public snapshot age before downstream consumers should treat it as stale; default 3x interval or 5m")
 	flag.BoolVar(&pretty, "pretty", true, "pretty-print JSON output")
 	flag.Parse()
 
@@ -47,6 +49,7 @@ func main() {
 		if err != nil {
 			exitf("collect: %v", err)
 		}
+		applySnapshotFreshness(snapshot, interval, snapshotMaxAge)
 		if err := writeSnapshot(outputPath, snapshot, pretty); err != nil {
 			exitf("write snapshot: %v", err)
 		}
@@ -60,8 +63,11 @@ func main() {
 		snapshot, err := runner.Collect(ctx)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "collect: %v\n", err)
-		} else if err := writeSnapshot(outputPath, snapshot, pretty); err != nil {
-			fmt.Fprintf(os.Stderr, "write snapshot: %v\n", err)
+		} else {
+			applySnapshotFreshness(snapshot, interval, snapshotMaxAge)
+			if err := writeSnapshot(outputPath, snapshot, pretty); err != nil {
+				fmt.Fprintf(os.Stderr, "write snapshot: %v\n", err)
+			}
 		}
 
 		select {
@@ -70,6 +76,24 @@ func main() {
 		case <-ticker.C:
 		}
 	}
+}
+
+func applySnapshotFreshness(snapshot *status.Snapshot, interval, configuredMaxAge time.Duration) {
+	snapshot.SetFreshness(interval, defaultSnapshotMaxAge(interval, configuredMaxAge))
+}
+
+func defaultSnapshotMaxAge(interval, configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	if interval > 0 {
+		maxAge := interval * 3
+		if maxAge < 30*time.Second {
+			return 30 * time.Second
+		}
+		return maxAge
+	}
+	return 5 * time.Minute
 }
 
 func writeSnapshot(path string, snapshot *status.Snapshot, pretty bool) error {

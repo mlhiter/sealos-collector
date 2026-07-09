@@ -12,6 +12,8 @@
 
 - Sync snapshots into OpenStatus workspace/page/static page components by
   default.
+- Add a Status Pipeline freshness component so stale `summary.json` data becomes
+  visible and auto-resolves when fresh data returns.
 - Create active status reports for non-operational components.
 - Resolve collector-owned reports when components recover.
 - Keep OpenStatus uptime/monitor components optional until real monitor runs
