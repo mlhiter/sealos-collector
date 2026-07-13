@@ -111,10 +111,14 @@ with a product outage in the monitored cluster.
 
 OpenStatus is the public communication surface. The backend adapter maps
 snapshot components to OpenStatus static page components by default and maps
-non-operational component states to active status reports. It renders
-collector-provided incident semantics as dense Incident Digest updates instead
-of classifying warning samples itself. It also renders the generated `Status
-Pipeline` freshness component so stale status data becomes visible and resolves
-when a fresh snapshot arrives. Recovery resolves the corresponding
+publishable non-operational component states to active status reports. It
+renders collector-provided incident semantics as dense Incident Digest updates
+instead of classifying warning samples itself. Symptom-only warning events and
+warning-level derived metrics remain in the snapshot without opening public
+incidents; hard serving-path, control-plane, dependency, unknown, outage, and
+Status Pipeline freshness failures remain public. Active reports are throttled
+by semantic signature so count/value churn does not fill incident history. The
+generated `Status Pipeline` freshness component makes stale status data visible
+and resolves when a fresh snapshot arrives. Recovery resolves the corresponding
 collector-owned report. OpenStatus monitor components are an optional mode for a
 later full uptime setup, not the default public display path.

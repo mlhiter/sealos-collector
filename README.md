@@ -128,7 +128,10 @@ component with no viable serving path is `outage`.
 Non-operational checks include structured public semantics such as
 `reasonCode`, `impactHint`, `signalSummary`, and `confidence`. The OpenStatus
 adapter renders those fields into compact Incident Digest updates without
-parsing raw Kubernetes event text.
+parsing raw Kubernetes event text. Incident Digests are intentionally narrower
+than the snapshot: warning-event symptoms, warning-level derived metrics, and
+volatile sample counts can stay in `summary.json` without opening or refreshing
+a public incident.
 
 Prometheus/VictoriaMetrics checks expose only the instant sample value and the
 threshold relationship that fired, for example `value 1.105 > warning threshold
@@ -270,8 +273,12 @@ report explaining that status-page data may lag behind current platform health.
 OpenStatus reports are collector-owned:
 
 - `operational` resolves the active report.
-- `unknown` and `degraded` create or update a degraded-performance report.
-- `outage` creates or updates a major-outage report.
+- hard `servingPath`, `controlPlane`, `dependency`, `unknown`, and `outage`
+  failures create or update a report with the matching public impact.
+- symptom-only warning and derived metric signals remain snapshot-only unless
+  they are part of a publishable hard failure.
+- active reports add a new update only when status, impact, or semantic cause
+  changes, or after the digest throttle window.
 - removed components have their stale collector-owned reports resolved.
 
 ## Deployment

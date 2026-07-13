@@ -69,6 +69,150 @@ func TestPageConfigurationCanHideUptime(t *testing.T) {
 	}
 }
 
+func TestReportPolicySuppressesDerivedWarningSignals(t *testing.T) {
+	policy := reportPolicyForComponent(status.Component{
+		ID:      "platform-control-plane",
+		Name:    "Platform Control Plane",
+		Status:  status.Degraded,
+		Summary: "One or more checks are degraded",
+		PublicChecks: []status.PublicCheckResult{
+			{
+				Name:          "Recent actionable cluster warnings",
+				Type:          "recentWarnings",
+				Impact:        "symptom",
+				Status:        status.Outage,
+				ReasonCode:    "probe_failure",
+				SignalSummary: "App Launchpad probe failures; 60 warning events in 15m0s; 7 ignored as historical noise",
+			},
+			{
+				Name:          "Kubernetes API p99 latency",
+				Type:          "prometheusQuery",
+				Impact:        "controlPlane",
+				Status:        status.Degraded,
+				ReasonCode:    "metric_threshold_breached",
+				SignalSummary: "Kubernetes API p99 latency value 1.105 > warning threshold 1",
+			},
+		},
+	})
+
+	if policy.publish {
+		t.Fatalf("publish = true, want symptom/derived warning signals to stay snapshot-only")
+	}
+}
+
+func TestReportPolicyKeepsHardCheckAndFiltersVolatileSymptoms(t *testing.T) {
+	component := status.Component{
+		ID:      "platform-control-plane",
+		Name:    "Platform Control Plane",
+		Status:  status.Degraded,
+		Summary: "One or more checks are degraded",
+		PublicChecks: []status.PublicCheckResult{
+			{
+				Name:          "Kubernetes API readyz",
+				Type:          "kubernetesReadyz",
+				Impact:        "controlPlane",
+				Status:        status.Degraded,
+				ReasonCode:    "kubernetes_readyz_failed",
+				ImpactHint:    "Platform Control Plane management operations may be degraded",
+				SignalSummary: "Kubernetes API readyz failed",
+			},
+			{
+				Name:          "Recent actionable cluster warnings",
+				Type:          "recentWarnings",
+				Impact:        "symptom",
+				Status:        status.Degraded,
+				ReasonCode:    "probe_failure",
+				SignalSummary: "App Launchpad probe failures; 60 warning events in 15m0s",
+			},
+		},
+	}
+
+	policy := reportPolicyForComponent(component)
+	if !policy.publish {
+		t.Fatalf("publish = false, want hard control-plane check to publish")
+	}
+	if len(policy.checks) != 1 || policy.checks[0].Name != "Kubernetes API readyz" {
+		t.Fatalf("policy checks = %#v, want only readyz", policy.checks)
+	}
+
+	message := reportUpdateMessage(componentForReport(component, policy.checks), false)
+	if strings.Contains(message, "warning events") || strings.Contains(message, "App Launchpad") {
+		t.Fatalf("message included volatile symptom evidence:\n%s", message)
+	}
+	if !strings.Contains(message, "Kubernetes API readiness failed") {
+		t.Fatalf("message missing readyz cause:\n%s", message)
+	}
+}
+
+func TestReportPolicyKeepsCriticalMetricOutage(t *testing.T) {
+	policy := reportPolicyForComponent(status.Component{
+		ID:      "platform-control-plane",
+		Name:    "Platform Control Plane",
+		Status:  status.Degraded,
+		Summary: "One or more checks are degraded",
+		PublicChecks: []status.PublicCheckResult{
+			{
+				Name:          "Kubernetes API p99 latency",
+				Type:          "prometheusQuery",
+				Impact:        "controlPlane",
+				Status:        status.Outage,
+				ReasonCode:    "metric_threshold_breached",
+				SignalSummary: "Kubernetes API p99 latency value 3.2 > critical threshold 3",
+			},
+		},
+	})
+
+	if !policy.publish {
+		t.Fatalf("publish = false, want critical non-symptom metric outage to publish")
+	}
+}
+
+func TestReportPolicyKeepsStatusPipelineFreshness(t *testing.T) {
+	generatedAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	component := statusPipelineComponent(&status.Snapshot{
+		GeneratedAt: generatedAt,
+		Freshness:   &status.Freshness{MaxAgeSeconds: 180},
+	}, generatedAt.Add(4*time.Minute), 5*time.Minute)
+
+	policy := reportPolicyForComponent(component)
+	if !policy.publish {
+		t.Fatalf("publish = false, want stale Status Pipeline to publish")
+	}
+}
+
+func TestShouldAddReportUpdateThrottlesVolatileEvidence(t *testing.T) {
+	now := time.Date(2026, 7, 13, 1, 17, 0, 0, time.UTC)
+	latest := latestUpdate{
+		Status:     "identified",
+		Impact:     "degraded_performance",
+		Message:    "Platform Control Plane degraded: App Launchpad probe failures detected.\nImpact: Platform Control Plane may be degraded if this symptom persists.\nSignal: App Launchpad probe failures; 61 warning events in 15m0s; 7 ignored as historical noise.",
+		ObservedAt: now,
+	}
+	message := "Platform Control Plane degraded: App Launchpad probe failures detected.\nImpact: Platform Control Plane may be degraded if this symptom persists.\nSignal: App Launchpad probe failures; 60 warning events in 15m0s; 6 ignored as historical noise."
+
+	if shouldAddReportUpdate(latest, "identified", "degraded_performance", message, now.Add(time.Minute)) {
+		t.Fatalf("shouldAddReportUpdate = true, want volatile count churn within digest window suppressed")
+	}
+	if !shouldAddReportUpdate(latest, "identified", "degraded_performance", message, now.Add(defaultReportUpdateDigestInterval+time.Second)) {
+		t.Fatalf("shouldAddReportUpdate = false, want digest after throttle window")
+	}
+}
+
+func TestShouldAddReportUpdatePublishesSemanticChange(t *testing.T) {
+	now := time.Date(2026, 7, 13, 1, 17, 0, 0, time.UTC)
+	latest := latestUpdate{
+		Status:     "identified",
+		Impact:     "degraded_performance",
+		Message:    "Platform Control Plane degraded: Kubernetes API readiness failed.\nSignal: Kubernetes API readyz failed.",
+		ObservedAt: now,
+	}
+	message := "Platform Control Plane degraded: Kubernetes API p99 latency breached its health threshold value 3.2 > critical threshold 3.\nSignal: Kubernetes API p99 latency value 3.2 > critical threshold 3."
+
+	if !shouldAddReportUpdate(latest, "identified", "degraded_performance", message, now.Add(time.Minute)) {
+		t.Fatalf("shouldAddReportUpdate = false, want semantic cause change to publish")
+	}
+}
+
 func TestReportUpdateMessageUsesCompactDiagnostics(t *testing.T) {
 	message := reportUpdateMessage(status.Component{
 		Name:        "Console",
@@ -286,6 +430,124 @@ func TestStatusPipelineComponentUsesFallbackMaxAge(t *testing.T) {
 	}
 	if got := component.PublicChecks[0].Metadata["maxAgeSeconds"]; got != "300" {
 		t.Fatalf("maxAgeSeconds = %q, want fallback 300", got)
+	}
+}
+
+func TestSyncComponentReportDoesNotTouchActiveReportForFreshnessDigestChurn(t *testing.T) {
+	var statements []string
+	generatedAt := time.Date(2026, 7, 9, 8, 0, 0, 0, time.UTC)
+	latestMessage := "Status Pipeline degraded: Collector snapshot freshness is stale (snapshot age 240s exceeds max age 180s).\nImpact: status page data may lag behind current platform health.\nSignal: snapshot age 240s exceeds max age 180s."
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request pipelineRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sql := request.Requests[0].Stmt.SQL
+		statements = append(statements, sql)
+		response := pipelineResponse{Results: []pipelineResult{{
+			Type: "ok",
+			Response: pipelineResponseItem{
+				Type:   "execute",
+				Result: fakeActiveReportDedupeResult(sql, latestMessage, generatedAt),
+			},
+		}}}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	syncer, err := NewSyncer(Options{DatabaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewSyncer() error = %v", err)
+	}
+	component := statusPipelineComponent(&status.Snapshot{
+		GeneratedAt: generatedAt,
+		Freshness:   &status.Freshness{MaxAgeSeconds: 180},
+	}, generatedAt.Add(5*time.Minute), 5*time.Minute)
+
+	action, err := syncer.syncComponentReport(context.Background(), 2, 5, component, generatedAt, defaultReportTitlePrefix)
+	if err != nil {
+		t.Fatalf("syncComponentReport() error = %v\nstatements:\n%s", err, strings.Join(statements, "\n"))
+	}
+	if action != reportNoop {
+		t.Fatalf("action = %s, want noop", action)
+	}
+	joined := strings.Join(statements, "\n")
+	for _, notWant := range []string{
+		"UPDATE status_report SET status =",
+		"INSERT INTO status_report_update",
+	} {
+		if strings.Contains(joined, notWant) {
+			t.Fatalf("sync touched active report for digest churn with %q:\n%s", notWant, joined)
+		}
+	}
+}
+
+func TestSyncComponentReportResolvesActiveSnapshotOnlyReport(t *testing.T) {
+	var statements []string
+	observedAt := time.Date(2026, 7, 13, 1, 17, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request pipelineRequest
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		sql := request.Requests[0].Stmt.SQL
+		statements = append(statements, sql)
+		response := pipelineResponse{Results: []pipelineResult{{
+			Type: "ok",
+			Response: pipelineResponseItem{
+				Type:   "execute",
+				Result: fakeSnapshotOnlyResolveResult(sql),
+			},
+		}}}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	syncer, err := NewSyncer(Options{DatabaseURL: server.URL})
+	if err != nil {
+		t.Fatalf("NewSyncer() error = %v", err)
+	}
+	component := status.Component{
+		ID:      "platform-control-plane",
+		Name:    "Platform Control Plane",
+		Status:  status.Degraded,
+		Summary: "One or more checks are degraded",
+		PublicChecks: []status.PublicCheckResult{
+			{
+				Name:          "Recent actionable cluster warnings",
+				Type:          "recentWarnings",
+				Impact:        "symptom",
+				Status:        status.Degraded,
+				ReasonCode:    "probe_failure",
+				SignalSummary: "App Launchpad probe failures; 60 warning events in 15m0s",
+			},
+		},
+	}
+
+	action, err := syncer.syncComponentReport(context.Background(), 2, 5, component, observedAt, defaultReportTitlePrefix)
+	if err != nil {
+		t.Fatalf("syncComponentReport() error = %v\nstatements:\n%s", err, strings.Join(statements, "\n"))
+	}
+	if action != reportResolved {
+		t.Fatalf("action = %s, want resolved", action)
+	}
+	joined := strings.Join(statements, "\n")
+	for _, want := range []string{
+		"INSERT INTO status_report_update",
+		"remaining health signals are snapshot-only",
+		"UPDATE status_report SET status = 'resolved'",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("sync statements missing %q:\n%s", want, joined)
+		}
 	}
 }
 
@@ -600,10 +862,40 @@ func fakeSyncResult(sql string) *ResultSet {
 	}
 }
 
+func fakeActiveReportDedupeResult(sql, latestMessage string, observedAt time.Time) *ResultSet {
+	switch {
+	case strings.Contains(sql, "SELECT sr.id FROM status_report sr JOIN status_report_to_page_component"):
+		return resultWithInt64(6)
+	case strings.Contains(sql, "SELECT u.status, u.message"):
+		return resultWithValues("identified", latestMessage, "degraded_performance", strconv.FormatInt(observedAt.Unix(), 10))
+	default:
+		return &ResultSet{}
+	}
+}
+
+func fakeSnapshotOnlyResolveResult(sql string) *ResultSet {
+	switch {
+	case strings.Contains(sql, "SELECT sr.id FROM status_report sr JOIN status_report_to_page_component"):
+		return resultWithInt64(6)
+	case strings.Contains(sql, "INSERT INTO status_report_update"):
+		return resultWithInt64(7)
+	default:
+		return &ResultSet{}
+	}
+}
+
 func resultWithInt64(value int64) *ResultSet {
 	return &ResultSet{
 		Rows: [][]Cell{
 			{{Type: "integer", Value: strconv.FormatInt(value, 10)}},
 		},
 	}
+}
+
+func resultWithValues(values ...string) *ResultSet {
+	row := make([]Cell, 0, len(values))
+	for _, value := range values {
+		row = append(row, Cell{Type: "text", Value: value})
+	}
+	return &ResultSet{Rows: [][]Cell{row}}
 }

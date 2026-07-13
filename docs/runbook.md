@@ -218,18 +218,24 @@ jq '{generatedAt, freshness}' /opt/sealos-collector/public/summary.json
 
 OpenStatus components do not store a direct collector-owned current-status
 column. The syncer reflects component health by creating an active status report
-when a component is `degraded`, `outage`, or `unknown`, and resolving that
-report when the component returns to `operational`. With `--show-uptime=false`,
-the syncer maps collector components to OpenStatus static page components,
-disables collector-owned monitor rows, and resolves stale reports for components
-that are no longer managed by the collector. Enable `--show-uptime=true` only
-after real OpenStatus monitor runs are available.
+when a component has a publishable `degraded`, `outage`, or `unknown` state, and
+resolving that report when the component returns to `operational`. Symptom-only
+warning events and warning-level derived metrics stay snapshot-only; if an older
+active report exists for such a component, the syncer resolves it with a
+snapshot-only recovery note. With `--show-uptime=false`, the syncer maps
+collector components to OpenStatus static page components, disables
+collector-owned monitor rows, and resolves stale reports for components that are
+no longer managed by the collector. Enable `--show-uptime=true` only after real
+OpenStatus monitor runs are available.
 
 Status report updates are public-safe Incident Digests, not raw collector dumps.
 The collector always emits sanitized `publicChecks` with structured
 `reasonCode`, `impactHint`, `signalSummary`, and `confidence` fields;
 `openstatus-sync` renders those fields into a concise headline cause, an impact
-sentence, and at most two safe signals. Recovery stays one line. Keep
+sentence, and at most two safe signals. The syncer compares semantic update
+signatures and throttles repeated digests, so volatile warning counts, ignored
+counts, metric samples, and stale age seconds do not create public update spam.
+Recovery stays one line. Keep
 `publish.includeCheckDetails: false` for public pages unless a private consumer
 explicitly needs raw check metadata.
 

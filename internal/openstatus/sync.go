@@ -16,6 +16,7 @@ import (
 
 const defaultReportTitlePrefix = "Sealos Collector:"
 const defaultSnapshotMaxAge = 5 * time.Minute
+const defaultReportUpdateDigestInterval = 30 * time.Minute
 
 const (
 	statusPipelineComponentID = "status-pipeline"
@@ -26,6 +27,7 @@ const (
 var (
 	publicLineURLPattern         = regexp.MustCompile(`https?://[^\s"]+`)
 	publicLineSensitiveKVPattern = regexp.MustCompile(`(?i)(token|password|secret|key)=([^&\s]+)`)
+	reportSignatureNumberPattern = regexp.MustCompile(`\d+(?:\.\d+)?`)
 )
 
 type Options struct {
@@ -646,23 +648,23 @@ func (s *Syncer) syncComponentReport(ctx context.Context, pageID, componentID in
 			return reportNoop, nil
 		}
 		message := reportUpdateMessage(component, true)
-		if err := s.addReportUpdate(ctx, reportID, componentID, "resolved", message, "operational", observedAt); err != nil {
-			return reportNoop, err
+		return s.resolveReport(ctx, reportID, componentID, message, observedAt)
+	}
+
+	policy := reportPolicyForComponent(component)
+	if !policy.publish {
+		if !active {
+			return reportNoop, nil
 		}
-		_, err := s.db.Execute(ctx, fmt.Sprintf(
-			"UPDATE status_report SET status = 'resolved', updated_at = %d WHERE id = %d",
-			unixSeconds(observedAt), reportID,
-		))
-		if err != nil {
-			return reportNoop, err
-		}
-		return reportResolved, nil
+		message := snapshotOnlyReportResolvedMessage(component)
+		return s.resolveReport(ctx, reportID, componentID, message, observedAt)
 	}
 
 	reportStatus := reportStatusForLevel(component.Status)
 	impact := impactForLevel(component.Status)
 	title := fmt.Sprintf("%s %s %s", strings.TrimSpace(titlePrefix), component.Name, component.Status)
-	message := reportUpdateMessage(component, false)
+	reportComponent := componentForReport(component, policy.checks)
+	message := reportUpdateMessage(reportComponent, false)
 
 	if !active {
 		reportID, err = s.insertID(ctx, fmt.Sprintf(
@@ -681,13 +683,6 @@ func (s *Syncer) syncComponentReport(ctx context.Context, pageID, componentID in
 		return reportCreated, nil
 	}
 
-	_, err = s.db.Execute(ctx, fmt.Sprintf(
-		"UPDATE status_report SET status = %s, title = %s, updated_at = %d WHERE id = %d",
-		sqlQuote(reportStatus), sqlQuote(title), unixSeconds(observedAt), reportID,
-	))
-	if err != nil {
-		return reportNoop, err
-	}
 	if err := s.linkReportComponent(ctx, reportID, componentID); err != nil {
 		return reportNoop, err
 	}
@@ -696,14 +691,125 @@ func (s *Syncer) syncComponentReport(ctx context.Context, pageID, componentID in
 	if err != nil {
 		return reportNoop, err
 	}
-	if ok && latest.Status == reportStatus && latest.Message == message && latest.Impact == impact {
+	if ok && !shouldAddReportUpdate(latest, reportStatus, impact, message, observedAt) {
 		return reportNoop, nil
+	}
+
+	_, err = s.db.Execute(ctx, fmt.Sprintf(
+		"UPDATE status_report SET status = %s, title = %s, updated_at = %d WHERE id = %d",
+		sqlQuote(reportStatus), sqlQuote(title), unixSeconds(observedAt), reportID,
+	))
+	if err != nil {
+		return reportNoop, err
 	}
 
 	if err := s.addReportUpdate(ctx, reportID, componentID, reportStatus, message, impact, observedAt); err != nil {
 		return reportNoop, err
 	}
 	return reportUpdated, nil
+}
+
+type reportPolicy struct {
+	publish bool
+	checks  []status.PublicCheckResult
+}
+
+func reportPolicyForComponent(component status.Component) reportPolicy {
+	if component.Status == status.Operational {
+		return reportPolicy{}
+	}
+
+	checks := reportChecks(component, false)
+	if statusPipelineReport(component, checks) {
+		return reportPolicy{publish: true, checks: checks}
+	}
+	if len(checks) == 0 {
+		return reportPolicy{publish: true}
+	}
+
+	publishable := make([]status.PublicCheckResult, 0, len(checks))
+	for _, check := range checks {
+		if publishableReportCheck(check) {
+			publishable = append(publishable, check)
+		}
+	}
+	if len(publishable) == 0 {
+		return reportPolicy{}
+	}
+	return reportPolicy{publish: true, checks: publishable}
+}
+
+func componentForReport(component status.Component, checks []status.PublicCheckResult) status.Component {
+	if checks == nil {
+		return component
+	}
+	reportComponent := component
+	reportComponent.PublicChecks = checks
+	reportComponent.Checks = nil
+	return reportComponent
+}
+
+func statusPipelineReport(component status.Component, checks []status.PublicCheckResult) bool {
+	if component.ID == statusPipelineComponentID {
+		return true
+	}
+	for _, check := range checks {
+		if strings.EqualFold(check.Type, "snapshotFreshness") || check.ReasonCode == "snapshot_stale" {
+			return true
+		}
+	}
+	return false
+}
+
+func publishableReportCheck(check status.PublicCheckResult) bool {
+	if check.Status == status.Operational {
+		return false
+	}
+	if strings.EqualFold(check.Type, "snapshotFreshness") || check.ReasonCode == "snapshot_stale" {
+		return true
+	}
+	if check.Status == status.Outage && !isSymptomImpact(check.Impact) {
+		return true
+	}
+
+	switch strings.ToLower(check.Impact) {
+	case "servingpath":
+		return true
+	case "controlplane", "dependency":
+		return isHardPublicCheckType(check.Type)
+	case "symptom", "informational":
+		return false
+	case "":
+		return !isDerivedPublicCheckType(check.Type)
+	default:
+		return isHardPublicCheckType(check.Type)
+	}
+}
+
+func isSymptomImpact(impact string) bool {
+	return strings.EqualFold(impact, "symptom") || strings.EqualFold(impact, "informational")
+}
+
+func isHardPublicCheckType(checkType string) bool {
+	switch strings.ToLower(checkType) {
+	case "workload", "serviceendpoints", "http", "kubernetesreadyz":
+		return true
+	default:
+		return false
+	}
+}
+
+func isDerivedPublicCheckType(checkType string) bool {
+	switch strings.ToLower(checkType) {
+	case "recentwarnings", "prometheusquery":
+		return true
+	default:
+		return false
+	}
+}
+
+func snapshotOnlyReportResolvedMessage(component status.Component) string {
+	return fmt.Sprintf("%s report resolved: remaining health signals are snapshot-only and do not indicate confirmed user impact.", component.Name)
 }
 
 func reportUpdateMessage(component status.Component, recovered bool) string {
@@ -1174,15 +1280,30 @@ func (s *Syncer) addReportUpdate(ctx context.Context, reportID, componentID int6
 	return err
 }
 
+func (s *Syncer) resolveReport(ctx context.Context, reportID, componentID int64, message string, observedAt time.Time) (reportAction, error) {
+	if err := s.addReportUpdate(ctx, reportID, componentID, "resolved", message, "operational", observedAt); err != nil {
+		return reportNoop, err
+	}
+	_, err := s.db.Execute(ctx, fmt.Sprintf(
+		"UPDATE status_report SET status = 'resolved', updated_at = %d WHERE id = %d",
+		unixSeconds(observedAt), reportID,
+	))
+	if err != nil {
+		return reportNoop, err
+	}
+	return reportResolved, nil
+}
+
 type latestUpdate struct {
-	Status  string
-	Message string
-	Impact  string
+	Status     string
+	Message    string
+	Impact     string
+	ObservedAt time.Time
 }
 
 func (s *Syncer) latestUpdate(ctx context.Context, reportID, componentID int64) (latestUpdate, bool, error) {
 	rows, err := s.db.Execute(ctx, fmt.Sprintf(
-		"SELECT u.status, u.message, COALESCE(pc.impact, '') FROM status_report_update u LEFT JOIN status_report_update_to_page_component pc ON pc.status_report_update_id = u.id AND pc.page_component_id = %d WHERE u.status_report_id = %d ORDER BY u.date DESC, u.id DESC LIMIT 1",
+		"SELECT u.status, u.message, COALESCE(pc.impact, ''), u.date FROM status_report_update u LEFT JOIN status_report_update_to_page_component pc ON pc.status_report_update_id = u.id AND pc.page_component_id = %d WHERE u.status_report_id = %d ORDER BY u.date DESC, u.id DESC LIMIT 1",
 		componentID, reportID,
 	))
 	if err != nil {
@@ -1202,7 +1323,35 @@ func (s *Syncer) latestUpdate(ctx context.Context, reportID, componentID int64) 
 	if len(row) > 2 {
 		value.Impact = row[2].Value
 	}
+	if len(row) > 3 {
+		seconds, err := parseInt64(row[3].Value)
+		if err != nil {
+			return latestUpdate{}, false, err
+		}
+		if seconds > 0 {
+			value.ObservedAt = time.Unix(seconds, 0).UTC()
+		}
+	}
 	return value, true, nil
+}
+
+func shouldAddReportUpdate(latest latestUpdate, reportStatus, impact, message string, observedAt time.Time) bool {
+	if latest.Status != reportStatus || latest.Impact != impact {
+		return true
+	}
+	if reportUpdateSignature(latest.Message) != reportUpdateSignature(message) {
+		return true
+	}
+	if latest.ObservedAt.IsZero() || observedAt.IsZero() {
+		return false
+	}
+	return observedAt.Sub(latest.ObservedAt) >= defaultReportUpdateDigestInterval
+}
+
+func reportUpdateSignature(message string) string {
+	normalized := strings.ToLower(strings.Join(strings.Fields(message), " "))
+	normalized = reportSignatureNumberPattern.ReplaceAllString(normalized, "<n>")
+	return normalized
 }
 
 func (s *Syncer) queryID(ctx context.Context, sql string) (int64, bool, error) {

@@ -19,7 +19,8 @@ OpenStatus public pages should show:
   stale data.
 - User-facing and platform-internal components grouped by capability when the
   goal is whole-platform health.
-- Open collector-owned reports for degraded, outage, or unknown components.
+- Open collector-owned reports for publishable degraded, outage, or unknown
+  component states.
 - Human incident or maintenance notes when operators need richer wording.
 
 Public pages should avoid:

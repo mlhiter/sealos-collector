@@ -101,10 +101,14 @@ user-facing page.
 - Snapshot group -> OpenStatus page component group.
 - Snapshot freshness -> generated OpenStatus `Status Pipeline` page component.
 - `operational` -> no active collector-owned status report.
-- `degraded` -> active status report with `degraded_performance` impact.
+- publishable `degraded` -> active status report with
+  `degraded_performance` impact.
 - `outage` -> active status report with `major_outage` impact.
 - `unknown` -> active status report with `degraded_performance` impact, because
   the collector lacks evidence of a full outage.
+- symptom-only warning signals and warning-level derived metrics stay
+  snapshot-only and resolve any older active collector-owned report for that
+  component.
 
 When a component returns to `operational`, the syncer resolves the active
 collector-owned report and adds a resolved update. Non-operational updates are
@@ -114,8 +118,11 @@ a display adapter; warning-event classification and namespace-to-product mapping
 belong to the collector health model. Raw pod samples, image URLs, internal
 Prometheus query details, and ignored-warning samples stay out of public status
 report messages; metric digests use the collector-provided threshold
-relationship when available. Freshness digests use only snapshot age,
-max-age seconds, and generated time, never local file paths or runtime secrets.
+relationship when available. Active report updates use a semantic signature and
+digest throttle, so changing counts, ignored-warning totals, exact sample
+values, or stale age seconds do not create minute-by-minute incident history.
+Freshness digests use only snapshot age, max-age seconds, and generated time,
+never local file paths or runtime secrets.
 Resolved updates are intentionally one line so public incident history stays
 dense. When a component is removed from collector scope, the syncer resolves its
 stale active collector-owned report so retired components do not stay on the
